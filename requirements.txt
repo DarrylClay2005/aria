@@ -1,0 +1,6 @@
+discord.py
+google-genai
+aiomysql
+aiohttp
+Pillow
+duckduckgo-search
