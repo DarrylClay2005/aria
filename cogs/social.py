@@ -1,15 +1,17 @@
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import aiomysql
 import logging
 import random
 from google import genai
 from google.genai import types
+import os
+from core.database import db
 
 logger = logging.getLogger("discord")
-DB_CONFIG = {'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True}
-GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE'
+
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -35,13 +37,12 @@ class Social(commands.Cog):
 
     @social_group.command(name="influence", description="View influence and affinity rankings in the server")
     async def influence(self, interaction: discord.Interaction):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT user_id, score FROM aria_affinity ORDER BY score DESC LIMIT 3")
-                    top = await cur.fetchall()
-                    await cur.execute("SELECT user_id, score FROM aria_affinity ORDER BY score ASC LIMIT 3")
-                    bottom = await cur.fetchall()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT user_id, score FROM aria_affinity ORDER BY score DESC LIMIT 3")
+                top = await cur.fetchall()
+                await cur.execute("SELECT user_id, score FROM aria_affinity ORDER BY score ASC LIMIT 3")
+                bottom = await cur.fetchall()
 
         embed = discord.Embed(title="👑 Server Influence Rankings", description="A definitive, highly judgmental list of who I tolerate and who I despise.", color=discord.Color.purple())
         if top:
@@ -57,30 +58,28 @@ class Social(commands.Cog):
         await interaction.response.defer(thinking=True)
         if target.bot: return await interaction.followup.send("I'm not wasting processing power analyzing another bot.")
 
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (target.id,))
-                    aff = (await cur.fetchone())
-                    affinity = aff[0] if aff else 0
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (target.id,))
+                aff = (await cur.fetchone())
+                affinity = aff[0] if aff else 0
+                
+                await cur.execute("INSERT IGNORE INTO aria_sanity (user_id) VALUES (%s)", (target.id,))
+                await cur.execute("SELECT sanity_level FROM aria_sanity WHERE user_id = %s", (target.id,))
+                san = (await cur.fetchone())
+                sanity = san[0] if san else 100
+                
+                try:
+                    await cur.execute("SELECT COUNT(*) FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (target.id,))
+                    tasks_row = (await cur.fetchone())
+                    pending_tasks = tasks_row[0] if tasks_row else 0
                     
-                    await cur.execute("INSERT IGNORE INTO aria_sanity (user_id) VALUES (%s)", (target.id,))
-                    await cur.execute("SELECT sanity_level FROM aria_sanity WHERE user_id = %s", (target.id,))
-                    san = (await cur.fetchone())
-                    sanity = san[0] if san else 100
-                    
-                    try:
-                        await cur.execute("SELECT COUNT(*) FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (target.id,))
-                        tasks = (await cur.fetchone())
-                        pending_tasks = tasks[0] if tasks else 0
-                        
-                        # THE SWARM INTEGRATION: Fetch Acoustic Profile from the Music Database
-                        await cur.execute("SELECT genre, play_count FROM discord_music_gws.gws_user_music_tastes WHERE user_id = %s ORDER BY play_count DESC LIMIT 3", (target.id,))
-                        music_rows = await cur.fetchall()
-                        music_tastes = ", ".join([f"{row[0]} ({row[1]} plays)" for row in music_rows]) if music_rows else "No tracked music taste. Probably listens to silence."
-                    except: 
-                        pending_tasks = 0
-                        music_tastes = "Unknown"
+                    await cur.execute("SELECT genre, play_count FROM discord_music_gws.gws_user_music_tastes WHERE user_id = %s ORDER BY play_count DESC LIMIT 3", (target.id,))
+                    music_rows = await cur.fetchall()
+                    music_tastes = ", ".join([f"{row[0]} ({row[1]} plays)" for row in music_rows]) if music_rows else "No tracked music taste. Probably listens to silence."
+                except: 
+                    pending_tasks = 0
+                    music_tastes = "Unknown"
 
         if affinity >= 80:
             tone = "Write a glowing, sweet, and fiercely protective psychological evaluation of this person. You adore them."
@@ -92,7 +91,7 @@ class Social(commands.Cog):
         prompt = f"Analyze '{target.display_name}'. Affinity: {affinity}/100. Sanity Level: {sanity}%. Unfinished Tasks: {pending_tasks}. Acoustic Profile (Most Played Genres): {music_tastes}.\n\n{tone}\n\nYou MUST actively judge them based on their Acoustic Profile. If they listen to sad music, mock them for wallowing. If they listen to weird genres, call them out."
         
         try:
-            res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze."))
+            res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze.")))
             embed = discord.Embed(title=f"📋 Psychological Profile: {target.display_name}", description=res.text[:4096], color=discord.Color.dark_red())
             embed.set_thumbnail(url=target.display_avatar.url)
             await interaction.followup.send(embed=embed)

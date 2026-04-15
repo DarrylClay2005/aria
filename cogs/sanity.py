@@ -6,7 +6,14 @@ import logging
 from datetime import datetime, timedelta
 
 logger = logging.getLogger("discord")
-DB_CONFIG = {'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True}
+import os
+DB_CONFIG = {
+    'host': os.getenv('ARIA_DB_HOST', '127.0.0.1'),
+    'user': os.getenv('ARIA_DB_USER', 'botuser'),
+    'password': os.getenv('ARIA_DB_PASSWORD', 'swarmpanel'),
+    'db': os.getenv('ARIA_DB_NAME', 'discord_aria'),
+    'autocommit': True
+}
 
 class Sanity(commands.Cog):
     def __init__(self, bot):

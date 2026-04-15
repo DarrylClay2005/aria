@@ -8,7 +8,7 @@ import json
 logger = logging.getLogger("discord")
 
 DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
+    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
 }
 
 class InteractionLogger(commands.Cog):

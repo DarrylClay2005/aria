@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -9,10 +10,10 @@ import logging
 logger = logging.getLogger("discord")
 
 DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
+    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
 }
 
-GEMINI_API_KEY = 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k'
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k')
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -43,7 +44,7 @@ class Surveillance(commands.Cog):
 
             prompt = f"Here is the chat log. Summarize the main topics, call out specific users who said stupid things, and roast them:\n\n{chat_log}"
             
-            response = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION))
+            response = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)))
             
             embed = discord.Embed(title="📜 Aria's Channel Summary", description=response.text[:4096], color=discord.Color.dark_teal())
             await interaction.followup.send(embed=embed)
@@ -71,7 +72,7 @@ class Surveillance(commands.Cog):
 
             prompt = f"I am investigating the human '{target.display_name}'. Here are their most recent quotes in the chat:\n\n{chat_log}\n\nRead their quotes. Write a brutal, profanity-laced evaluation of their personality, communication style, and intelligence based purely on what they've been saying."
             
-            response = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION))
+            response = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)))
             
             embed = discord.Embed(title=f"🕵️ Surveillance Log: {target.display_name}", description=response.text[:4096], color=discord.Color.red())
             embed.set_footer(text=f"Aria analyzed their last {len(messages)} messages.")

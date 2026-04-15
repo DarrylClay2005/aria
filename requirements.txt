@@ -4,3 +4,4 @@ aiomysql
 aiohttp
 Pillow
 duckduckgo-search
+python-dotenv

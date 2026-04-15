@@ -6,13 +6,9 @@ import logging
 import json
 import io
 from datetime import datetime, timedelta
+from core.database import db
 
 logger = logging.getLogger("discord")
-
-# --- CONFIGURATION ---
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
-}
 
 class AutomationAdmin(commands.Cog):
     def __init__(self, bot):
@@ -24,40 +20,37 @@ class AutomationAdmin(commands.Cog):
 
     # --- DATABASE INIT ---
     async def cog_load(self):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("""
-                        CREATE TABLE IF NOT EXISTS aria_automations (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            guild_id BIGINT,
-                            channel_id BIGINT,
-                            message TEXT,
-                            interval_hours INT,
-                            last_sent TIMESTAMP NULL DEFAULT NULL
-                        )
-                    """)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS aria_automations (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        guild_id BIGINT,
+                        channel_id BIGINT,
+                        message TEXT,
+                        interval_hours INT,
+                        last_sent TIMESTAMP NULL DEFAULT NULL
+                    )
+                """)
 
     # --- AUTOMATED MESSAGE LOOP ---
-    @tasks.loop(minutes=30.0) # Checks every 30 minutes
+    @tasks.loop(minutes=30.0) 
     async def auto_message_loop(self):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute("SELECT * FROM aria_automations")
-                    automations = await cur.fetchall()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT * FROM aria_automations")
+                automations = await cur.fetchall()
 
-                    now = datetime.now()
-                    for auto in automations:
-                        # If never sent, or if enough hours have passed
-                        if not auto['last_sent'] or (now - auto['last_sent']) >= timedelta(hours=auto['interval_hours']):
-                            channel = self.bot.get_channel(auto['channel_id'])
-                            if channel:
-                                try:
-                                    await channel.send(auto['message'])
-                                    await cur.execute("UPDATE aria_automations SET last_sent = %s WHERE id = %s", (now, auto['id']))
-                                except discord.Forbidden:
-                                    logger.error(f"Aria lacks permission to send auto-message in {channel.name}")
+                now = datetime.now()
+                for auto in automations:
+                    if not auto['last_sent'] or (now - auto['last_sent']) >= timedelta(hours=auto['interval_hours']):
+                        channel = self.bot.get_channel(auto['channel_id'])
+                        if channel:
+                            try:
+                                await channel.send(auto['message'])
+                                await cur.execute("UPDATE aria_automations SET last_sent = %s WHERE id = %s", (now, auto['id']))
+                            except discord.Forbidden:
+                                logger.error(f"Aria lacks permission to send auto-message in {channel.name}")
 
     @auto_message_loop.before_loop
     async def before_auto_message_loop(self):
@@ -72,24 +65,22 @@ class AutomationAdmin(commands.Cog):
         if interval_hours < 1:
             return await interaction.response.send_message("I'm not spamming a channel every few minutes. Minimum interval is 1 hour.", ephemeral=True)
 
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "INSERT INTO aria_automations (guild_id, channel_id, message, interval_hours) VALUES (%s, %s, %s, %s)", 
-                        (interaction.guild.id, channel.id, message, interval_hours)
-                    )
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO aria_automations (guild_id, channel_id, message, interval_hours) VALUES (%s, %s, %s, %s)", 
+                    (interaction.guild.id, channel.id, message, interval_hours)
+                )
                     
         await interaction.response.send_message(f"Fucking fine. I'll automatically post that message in {channel.mention} every **{interval_hours} hours**. Apparently, you humans are too forgetful to do it yourselves.")
 
     @auto_group.command(name="list", description="List all automated messages in this server")
     @app_commands.default_permissions(administrator=True)
     async def auto_list(self, interaction: discord.Interaction):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute("SELECT * FROM aria_automations WHERE guild_id = %s", (interaction.guild.id,))
-                    results = await cur.fetchall()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT * FROM aria_automations WHERE guild_id = %s", (interaction.guild.id,))
+                results = await cur.fetchall()
 
         if not results:
             return await interaction.response.send_message("You have no automated messages running. Good. Less work for me.", ephemeral=True)
@@ -106,12 +97,11 @@ class AutomationAdmin(commands.Cog):
     @auto_group.command(name="remove", description="Remove an automated message by its ID")
     @app_commands.default_permissions(administrator=True)
     async def auto_remove(self, interaction: discord.Interaction, auto_id: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("DELETE FROM aria_automations WHERE id = %s AND guild_id = %s", (auto_id, interaction.guild.id))
-                    if cur.rowcount == 0:
-                        return await interaction.response.send_message("I couldn't find an automation with that ID in this server. Are you blind?", ephemeral=True)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM aria_automations WHERE id = %s AND guild_id = %s", (auto_id, interaction.guild.id))
+                if cur.rowcount == 0:
+                    return await interaction.response.send_message("I couldn't find an automation with that ID in this server. Are you blind?", ephemeral=True)
 
         await interaction.response.send_message(f"Automation #{auto_id} deleted. I will no longer waste my breath on it.", ephemeral=False)
 
@@ -182,12 +172,10 @@ class AutomationAdmin(commands.Cog):
             "channels": [{"id": c.id, "name": c.name, "type": str(c.type)} for c in guild.channels]
         }
         
-        # Convert dictionary to formatted JSON string
         json_data = json.dumps(data, indent=4)
         file = discord.File(io.BytesIO(json_data.encode()), filename=f"backup_{guild.id}.json")
         
         await interaction.followup.send("Here is the blueprint of your server. Try not to lose it, because I'm not rebuilding it for you if you accidentally nuke everything.", file=file)
 
-# This function tells the main bot.py how to load this file
 async def setup(bot):
     await bot.add_cog(AutomationAdmin(bot))

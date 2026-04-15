@@ -9,7 +9,7 @@ logger = logging.getLogger("discord")
 
 # Aria's Database Config
 DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
+    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
 }
 
 class Vault(commands.Cog):

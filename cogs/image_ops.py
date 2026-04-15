@@ -8,7 +8,7 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("discord")
-DB_CONFIG = {'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_music_gws', 'autocommit': True}
+DB_CONFIG = {'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_music_gws', 'autocommit': True}
 
 # --- OMNI-LENS CREDENTIALS ---
 GOOGLE_API_KEY = "AIzaSyDgEPKxStYYmj-Jn14AXkzR0bchXKDjGIw"
@@ -37,7 +37,7 @@ class FontManager:
     @classmethod
     async def get_font(cls, size=40):
         if not cls._font_bytes:
-            url = "[https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Black.ttf](https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Black.ttf)"
+            url = "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Black.ttf"
             async with HTTPSessionManager() as session:
                 async with session.get(url) as resp:
                     cls._font_bytes = await resp.read()
@@ -190,7 +190,7 @@ class ImageOps(commands.Cog):
         if not url: return await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
         await interaction.response.defer(ephemeral=False)
         
-        api_url = f"[https://api.ocr.space/parse/imageurl?apikey=helloworld&url=](https://api.ocr.space/parse/imageurl?apikey=helloworld&url=){url}"
+        api_url = f"https://api.ocr.space/parse/imageurl?apikey=helloworld&url={url}"
         try:
             async with HTTPSessionManager() as session:
                 async with session.get(api_url) as resp:
@@ -217,7 +217,7 @@ class ImageOps(commands.Cog):
         if not url: return await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
         await interaction.response.defer(ephemeral=False)
         
-        api_url = f"[https://api.trace.moe/search?anilistInfo&url=](https://api.trace.moe/search?anilistInfo&url=){url}"
+        api_url = f"https://api.trace.moe/search?anilistInfo&url={url}"
         try:
             async with HTTPSessionManager() as session:
                 async with session.get(api_url) as resp:

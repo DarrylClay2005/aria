@@ -1,18 +1,16 @@
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from google import genai
 from google.genai import types
-import aiomysql
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import os
+from core.database import db
 
 logger = logging.getLogger("discord")
 
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
-}
-
-GEMINI_API_KEY = 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k'
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -25,12 +23,11 @@ class PresenceProfiler(commands.Cog):
         self.shame_loop.cancel()
 
     async def get_affinity(self, user_id: int) -> int:
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (user_id,))
-                    res = await cur.fetchone()
-                    return res[0] if res else 0
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (user_id,))
+                res = await cur.fetchone()
+                return res[0] if res else 0
 
     @tasks.loop(minutes=15.0)
     async def shame_loop(self):
@@ -61,17 +58,14 @@ class PresenceProfiler(commands.Cog):
                                     prompt = f"Write a brutal 2-sentence public callout for {member.display_name}."
                                     
                                     try:
-                                        res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=sys_inst))
+                                        res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=sys_inst)))
                                         await shame_channel.send(f"{member.mention} 🚨 **PRESENCE ALERT** 🚨\n\n{res.text}")
                                         
-                                        import datetime as dt
                                         try:
-                                            await member.timeout(dt.timedelta(hours=1), reason="Aria's Touch Grass Protocol")
+                                            await member.timeout(timedelta(hours=1), reason="Aria's Touch Grass Protocol")
                                             await shame_channel.send(f"*(I have timed them out for 1 hour so they are forced to go outside.)*")
                                         except discord.Forbidden:
                                             pass
-                                            
-                                        return 
                                     except Exception as e:
                                         logger.error(f"Presence Profiler Error: {e}")
 

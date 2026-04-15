@@ -11,10 +11,10 @@ from google.genai import types
 logger = logging.getLogger("discord")
 
 DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'botpassword', 'db': 'discord_aria', 'autocommit': True
+    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
 }
 
-GEMINI_API_KEY = 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k'
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k')
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -88,10 +88,10 @@ class Productivity(commands.Cog):
         prompt = f"The user is too stupid to figure out how to do this task: '{task_name}'. Break it down into 3 or 4 highly detailed, actionable sub-steps. Be incredibly condescending and swear at them for needing an AI to explain how to do basic human functions."
         
         try:
-            ai_res = client.models.generate_content(
+            ai_res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
                 model=MODEL_ID,
                 contents=prompt,
-                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren.")
+                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren."))
             )
             embed = discord.Embed(title=f"🧠 AI Breakdown: Task #{task_id}", description=ai_res.text[:4096], color=discord.Color.blue())
             await interaction.followup.send(embed=embed)
@@ -116,10 +116,10 @@ class Productivity(commands.Cog):
         prompt = f"The user {interaction.user.display_name} is procrastinating on these tasks: {task_list}. Write a vicious, profanity-laced rant absolutely tearing apart their work ethic, time management, and general life choices."
         
         try:
-            ai_res = client.models.generate_content(
+            ai_res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
                 model=MODEL_ID,
                 contents=prompt,
-                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren who hates laziness.")
+                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren who hates laziness."))
             )
             await interaction.followup.send(ai_res.text[:1999])
         except Exception:
