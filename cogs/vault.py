@@ -70,9 +70,9 @@ class Vault(commands.Cog):
         await channel.send(embed=embed)
 
     # --- THE VAULT COMMAND GROUP ---
-    vault_group = app_commands.Group(name="vault", description="Interact with Aria's Negative Energy Vault")
+    vault_group = app_commands.Group(name="vault", description="Check and feed the server's Negative Energy Vault.")
 
-    @vault_group.command(name="status", description="Check the server's negative energy level")
+    @vault_group.command(name="status", description="Check the current negative energy level for this server.")
     async def vault_status(self, interaction: discord.Interaction):
         energy = await self.get_energy(interaction.guild.id)
         
@@ -84,7 +84,7 @@ class Vault(commands.Cog):
         embed = discord.Embed(title="🔮 Negative Energy Vault", description=f"I feed on your suffering and conflict. Keep it coming.\n\n**[{bar}] {min(energy, 100)}%**", color=discord.Color.purple())
         await interaction.response.send_message(embed=embed)
 
-    @vault_group.command(name="sacrifice", description="Sacrifice your own coins to intentionally feed the vault")
+    @vault_group.command(name="sacrifice", description="Sacrifice your own coins to feed energy into the vault.")
     async def vault_sacrifice(self, interaction: discord.Interaction, coins: int):
         if coins < 100:
             return await interaction.response.send_message("Don't waste my time with pocket change. 100 coins minimum.", ephemeral=True)

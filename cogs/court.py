@@ -39,9 +39,9 @@ class ServerCourt(commands.Cog):
                     res = await cur.fetchone()
                     return res[0] if res else 0
 
-    court_group = app_commands.Group(name="court", description="Aria's completely biased judicial system")
+    court_group = app_commands.Group(name="court", description="Bring a case to Aria's deeply unfair courtroom.")
 
-    @court_group.command(name="sue", description="Sue another user for Psychological Damage (Sanity)")
+    @court_group.command(name="sue", description="Sue another member for sanity damage and let Aria judge the case.")
     @app_commands.describe(target="Who you are suing", amount="Sanity damage to inflict (Max 40)", reason="Why you are suing them")
     async def sue(self, interaction: discord.Interaction, target: discord.Member, amount: int, reason: str):
         if target.bot or target == interaction.user:

@@ -38,9 +38,9 @@ class Weeb(commands.Cog):
                     res = await cur.fetchone()
                     return res[0] if res else 0
 
-    weeb_group = app_commands.Group(name="weeb", description="Aria ruthlessly judges your anime tastes")
+    weeb_group = app_commands.Group(name="weeb", description="Let Aria judge your anime taste and find cursed recommendations.")
 
-    @weeb_group.command(name="degenerate", description="Random explicit anime + Sanity Damage")
+    @weeb_group.command(name="degenerate", description="Pull a cursed anime pick and take the sanity damage that comes with it.")
     async def degenerate(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         async with aiohttp.ClientSession() as session:

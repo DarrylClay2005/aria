@@ -31,9 +31,9 @@ class Sanity(commands.Cog):
                         )
                     """)
 
-    sanity_group = app_commands.Group(name="sanity", description="Track your rapidly deteriorating mental state")
+    sanity_group = app_commands.Group(name="sanity", description="Check or restore your rapidly collapsing sanity level.")
 
-    @sanity_group.command(name="check", description="Check your current Sanity level")
+    @sanity_group.command(name="check", description="Check your current sanity level and Aria's diagnosis.")
     async def check(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -50,7 +50,7 @@ class Sanity(commands.Cog):
         embed = discord.Embed(title="🧠 Mental State Evaluation", description=f"**Current Sanity: {sanity}%**\n\n{msg}", color=discord.Color.dark_blue())
         await interaction.response.send_message(embed=embed)
 
-    @sanity_group.command(name="therapy", description="Beg Aria to restore a fraction of your sanity (Daily)")
+    @sanity_group.command(name="therapy", description="Ask Aria for a daily sanity restore if she'll allow it.")
     async def therapy(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:

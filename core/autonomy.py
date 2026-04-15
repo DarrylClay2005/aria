@@ -26,9 +26,9 @@ class AutonomousEngine:
         except Exception as e:
             logger.error(e)
 
-    async def run(self):
-        while True:
-            if self.enabled:
-                for issue in await self.detect_issues():
-                    await self.fix_issue(issue)
-            await asyncio.sleep(10)
+    async def run_once(self):
+        if not self.enabled:
+            return
+
+        for issue in await self.detect_issues():
+            await self.fix_issue(issue)

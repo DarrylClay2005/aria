@@ -57,9 +57,9 @@ class AutomationAdmin(commands.Cog):
         await self.bot.wait_until_ready()
 
     # --- AUTOMATION COMMANDS ---
-    auto_group = app_commands.Group(name="auto_message", description="[OWNER] Manage Aria's automated recurring messages")
+    auto_group = app_commands.Group(name="auto_message", description="[OWNER] Create and manage recurring automated messages.")
 
-    @auto_group.command(name="set", description="Set up a new recurring automated message")
+    @auto_group.command(name="set", description="Create a recurring automated message for a channel.")
     @app_commands.default_permissions(administrator=True)
     async def auto_set(self, interaction: discord.Interaction, channel: discord.TextChannel, interval_hours: int, message: str):
         if interval_hours < 1:
@@ -74,7 +74,7 @@ class AutomationAdmin(commands.Cog):
                     
         await interaction.response.send_message(f"Fucking fine. I'll automatically post that message in {channel.mention} every **{interval_hours} hours**. Apparently, you humans are too forgetful to do it yourselves.")
 
-    @auto_group.command(name="list", description="List all automated messages in this server")
+    @auto_group.command(name="list", description="List every automated message configured for this server.")
     @app_commands.default_permissions(administrator=True)
     async def auto_list(self, interaction: discord.Interaction):
         async with db.pool.acquire() as conn:
@@ -94,7 +94,7 @@ class AutomationAdmin(commands.Cog):
         embed = discord.Embed(title="⚙️ Aria's Automated Schedules", description=desc, color=discord.Color.dark_grey())
         await interaction.response.send_message(embed=embed)
 
-    @auto_group.command(name="remove", description="Remove an automated message by its ID")
+    @auto_group.command(name="remove", description="Delete an automated message using its ID.")
     @app_commands.default_permissions(administrator=True)
     async def auto_remove(self, interaction: discord.Interaction, auto_id: int):
         async with db.pool.acquire() as conn:
@@ -106,7 +106,7 @@ class AutomationAdmin(commands.Cog):
         await interaction.response.send_message(f"Automation #{auto_id} deleted. I will no longer waste my breath on it.", ephemeral=False)
 
     # --- MASS ADMINISTRATION COMMANDS ---
-    @app_commands.command(name="mass_role_add", description="[OWNER] Add a specific role to multiple users at once")
+    @app_commands.command(name="mass_role_add", description="[OWNER] Add one role to multiple users in a single sweep.")
     @app_commands.default_permissions(administrator=True)
     async def mass_role_add(self, interaction: discord.Interaction, role: discord.Role, user_ids: str):
         await interaction.response.defer(ephemeral=True)
@@ -124,7 +124,7 @@ class AutomationAdmin(commands.Cog):
 
         await interaction.followup.send(f"Done. I aggressively slapped the **{role.name}** role onto {success} users out of the {len(id_list)} IDs provided.")
 
-    @app_commands.command(name="mass_channel_create", description="[OWNER] Create multiple identical text channels at once")
+    @app_commands.command(name="mass_channel_create", description="[OWNER] Create a batch of similarly named text channels.")
     @app_commands.default_permissions(administrator=True)
     async def mass_channel_create(self, interaction: discord.Interaction, base_name: str, count: int, category: discord.CategoryChannel = None):
         if count > 20:
@@ -141,7 +141,7 @@ class AutomationAdmin(commands.Cog):
                 
         await interaction.followup.send(f"For fuck's sake. I just built **{count}** '{base_name}' channels for you. I hope you're happy, because I'm exhausted.")
 
-    @app_commands.command(name="member_audit", description="[OWNER] Get detailed security information about a specific member")
+    @app_commands.command(name="member_audit", description="[OWNER] Inspect account age, roles, and permissions for a member.")
     @app_commands.default_permissions(administrator=True)
     async def member_audit(self, interaction: discord.Interaction, target: discord.Member):
         embed = discord.Embed(title=f"🔍 Security Audit: {target.display_name}", color=discord.Color.dark_red())
@@ -159,7 +159,7 @@ class AutomationAdmin(commands.Cog):
         embed.set_footer(text="Aria sees all. Aria judges all.")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="server_backup", description="[OWNER] Export a JSON file of your server's roles and channels")
+    @app_commands.command(name="server_backup", description="[OWNER] Export the server's roles and channels to a JSON backup.")
     @app_commands.default_permissions(administrator=True)
     async def server_backup(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)

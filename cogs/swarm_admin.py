@@ -54,9 +54,9 @@ class SwarmAdmin(commands.Cog):
     async def before_medic(self):
         await self.bot.wait_until_ready()
 
-    swarm_group = app_commands.Group(name="swarm", description="Advanced Central Router for the Quarantined 8-node Grid", default_permissions=discord.Permissions(administrator=True))
+    swarm_group = app_commands.Group(name="swarm", description="Admin controls for routing and managing the music bot swarm.", default_permissions=discord.Permissions(administrator=True))
 
-    @swarm_group.command(name="undo", description="The Archivist: Restore a recently purged queue for a specific bot.")
+    @swarm_group.command(name="undo", description="Restore the most recent backup queue for a specific swarm node.")
     @app_commands.choices(drone=DRONES)
     async def undo(self, interaction: discord.Interaction, drone: app_commands.Choice[str]):
         await interaction.response.defer(ephemeral=True)
@@ -77,7 +77,7 @@ class SwarmAdmin(commands.Cog):
                         await interaction.followup.send(f"❌ No backup table found for `{drone.name}` yet. Play some tracks first!")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="wrapped", description="Global Analytics: View the most played songs across the entire Swarm.")
+    @swarm_group.command(name="wrapped", description="View the most-played tracks across the swarm for this server.")
     async def wrapped(self, interaction: discord.Interaction):
         await interaction.response.defer()
         try:
@@ -103,7 +103,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(embed=embed)
         except Exception as e: await interaction.followup.send(f"❌ Analytics Error: {e}")
 
-    @swarm_group.command(name="radar", description="Scan the isolated tables and see what every music bot is doing.")
+    @swarm_group.command(name="radar", description="Inspect each node and see what every music bot is doing.")
     async def radar(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(title="📡 Global Swarm Radar (Quarantined Mode)", color=discord.Color.brand_green())
@@ -135,7 +135,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(embed=embed)
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="execute", description="Force a command into a specific node's isolated table.")
+    @swarm_group.command(name="execute", description="Push a playback override command into one or more swarm nodes.")
     @app_commands.choices(drone=DRONES)
     @app_commands.choices(command=[
         app_commands.Choice(name="Pause", value="PAUSE"), app_commands.Choice(name="Resume", value="RESUME"),
@@ -158,7 +158,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(f"☢️ **ROUTER OVERRIDE:** Pushed **{command.value}** protocol to {len(bots)} isolated tables.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="purge", description="Wipe the quarantined queue for a specific bot.")
+    @swarm_group.command(name="purge", description="Clear queued tracks and push a stop override to targeted nodes.")
     @app_commands.choices(drone=DRONES)
     async def purge(self, interaction: discord.Interaction, drone: app_commands.Choice[str] = None):
         try:
@@ -199,7 +199,7 @@ class SwarmAdmin(commands.Cog):
                 if interaction.channel:
                     await interaction.channel.send(err_msg)
 
-    @swarm_group.command(name="direct", description="Telepathic order to a SPECIFIC bot.")
+    @swarm_group.command(name="direct", description="Send a direct play or leave order to a specific bot.")
     @app_commands.choices(drone=DRONES)
     @app_commands.choices(action=[app_commands.Choice(name="Summon & Play", value="PLAY"), app_commands.Choice(name="Force Leave", value="LEAVE")])
     async def direct(self, interaction: discord.Interaction, drone: app_commands.Choice[str], action: app_commands.Choice[str], data: str = None):
@@ -224,7 +224,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(f"📡 **Telepathic Link:** Routed order straight into `{drone.name}`'s quarantined database table.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="broadcast", description="🚨 The Hive Mind Protocol: Deploy ALL active bots to play a track simultaneously.")
+    @swarm_group.command(name="broadcast", description="Deploy all active bots to play the same track at once.")
     async def broadcast(self, interaction: discord.Interaction, url: str):
         await interaction.response.defer(ephemeral=True)
         try:
@@ -245,7 +245,7 @@ class SwarmAdmin(commands.Cog):
             else: await interaction.followup.send(f"🚨 **SWARM BROADCAST:** Payload successfully injected into **{deployed}** nodes.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="set_home", description="Lock a SPECIFIC music bot to a voice/stage channel.")
+    @swarm_group.command(name="set_home", description="Assign a default voice or stage channel to one swarm node.")
     @app_commands.choices(drone=DRONES)
     async def set_home(self, interaction: discord.Interaction, drone: app_commands.Choice[str], channel: discord.VoiceChannel | discord.StageChannel):
         await interaction.response.defer(ephemeral=True)
@@ -258,7 +258,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(f"🏠 **Homing Beacon Set:** Written to `{drone.name}`'s isolated table.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="loop", description="Change the loop mode for a specific bot's database (or all of them).")
+    @swarm_group.command(name="loop", description="Change the loop mode for one bot or the whole swarm.")
     @app_commands.choices(drone=DRONES)
     @app_commands.choices(mode=[
         app_commands.Choice(name="Off (Standard Playback)", value="off"),
@@ -278,7 +278,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(msg)
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="queue", description="View the upcoming songs in a specific bot's queue.")
+    @swarm_group.command(name="queue", description="View the upcoming songs queued on a specific swarm node.")
     @app_commands.choices(drone=DRONES)
     async def view_queue(self, interaction: discord.Interaction, drone: app_commands.Choice[str]):
         await interaction.response.defer(ephemeral=True)
@@ -297,7 +297,7 @@ class SwarmAdmin(commands.Cog):
                     except: await interaction.followup.send(f"📭 `{drone.name}`'s queue is currently empty.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="shuffle", description="Randomize the upcoming tracks in a specific bot's queue.")
+    @swarm_group.command(name="shuffle", description="Shuffle the queued tracks on one bot or across the swarm.")
     @app_commands.choices(drone=DRONES)
     async def shuffle(self, interaction: discord.Interaction, drone: app_commands.Choice[str] = None):
         await interaction.response.defer(ephemeral=True)
@@ -339,7 +339,7 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send("\n".join(messages))
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="remove", description="Surgically delete a specific track number from a bot's queue.")
+    @swarm_group.command(name="remove", description="Remove a specific track number from a bot's queue.")
     @app_commands.choices(drone=DRONES)
     async def remove(self, interaction: discord.Interaction, drone: app_commands.Choice[str], track_number: int):
         await interaction.response.defer(ephemeral=True)
@@ -359,7 +359,7 @@ class SwarmAdmin(commands.Cog):
                     except: await interaction.followup.send(f"⚠️ `{drone.name}` queue not found.")
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
-    @swarm_group.command(name="filter", description="Change the audio filter (Nightcore, Bassboost, etc) for a bot.")
+    @swarm_group.command(name="filter", description="Set the audio filter for a specific bot or the whole swarm.")
     @app_commands.choices(drone=DRONES)
     @app_commands.choices(filter_type=[
         app_commands.Choice(name="High Quality (Unfiltered)", value="none"),

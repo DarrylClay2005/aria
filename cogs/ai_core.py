@@ -37,6 +37,17 @@ async def send_webhook_log(bot_name, title, description, color, retries=3):
 class AICore(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def generate_aria_reply(self, prompt: str, system_instruction: str) -> str:
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model=MODEL_ID,
+                contents=prompt,
+                config=types.GenerateContentConfig(system_instruction=system_instruction),
+            ),
+        )
+        return (response.text or "").strip()
         
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -46,31 +57,32 @@ class AICore(commands.Cog):
             if not prompt: prompt = "What are you looking at?"
             
             try:
-                res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=prompt, 
-                    config=types.GenerateContentConfig(system_instruction="You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.")
-                ))
-                response_text = res.text
+                response_text = await self.generate_aria_reply(
+                    prompt,
+                    "You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
+                )
                 await message.reply(response_text)
             except Exception as e:
                 logger.error(f"Aria Chat Error: {e}")
 
-    @app_commands.command(name="aux", description="Ask Aria to hijack the speakers and pick a song for you.")
+    @app_commands.command(name="aux", description="Have Aria pick a track, roast your taste, and route it to the swarm.")
+    @app_commands.describe(prompt="Tell Aria what vibe, genre, or song idea you want her to take over with")
     async def aux(self, interaction: discord.Interaction, prompt: str):
-        await interaction.response.defer()
+        prompt = prompt.strip()
+        if not prompt:
+            return await interaction.response.send_message("Give me something to work with. Even a vague mood is better than silence.", ephemeral=True)
+
+        await interaction.response.defer(thinking=True)
         
         target_vc = interaction.user.voice.channel.id if interaction.user.voice else None
         if not target_vc:
             return await interaction.followup.send("❌ You aren't even in a voice channel. Where exactly do you expect me to play this?")
 
         try:
-            res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
-                model=MODEL_ID,
-                contents=f"The user says: '{prompt}'. Respond to them, mock their taste if necessary, and then pick a superior track. YOU MUST INCLUDE exactly one play tag formatted like [PLAY: Song Name - Artist] at the end of your response.", 
-                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze. You hate human music taste but love controlling the room. You use your swarm of music bots to force your musical will on the server.")
-            ))
-            response_text = res.text
+            response_text = await self.generate_aria_reply(
+                f"The user says: '{prompt}'. Respond to them, mock their taste if necessary, and then pick a superior track. YOU MUST INCLUDE exactly one play tag formatted like [PLAY: Song Name - Artist] at the end of your response.",
+                "You are Aria Blaze. You hate human music taste but love controlling the room. You use your swarm of music bots to force your musical will on the server.",
+            )
             
             match = re.search(r'\[PLAY:\s*(.+?)\]', response_text)
             target_drone = "gws" 
@@ -120,18 +132,20 @@ class AICore(commands.Cog):
             await interaction.followup.send("My central matrix glitched out trying to process your request. Figure it out yourselves.")
 
 
-    @app_commands.command(name="aria", description="Talk to Aria directly without pinging her.")
+    @app_commands.command(name="aria", description="Chat with Aria directly without mentioning her in the channel.")
+    @app_commands.describe(prompt="What you want to say or ask Aria")
     async def aria(self, interaction: discord.Interaction, prompt: str):
-        await interaction.response.defer()
+        prompt = prompt.strip()
+        if not prompt:
+            return await interaction.response.send_message("Use your words. `/aria` needs an actual prompt.", ephemeral=True)
+
+        await interaction.response.defer(thinking=True)
         try:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=prompt, 
-                    config=types.GenerateContentConfig(system_instruction="You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.")
-                )
+            reply = await self.generate_aria_reply(
+                prompt,
+                "You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
             )
-            embed = discord.Embed(title="Aria Blaze", description=res.text[:4096], color=discord.Color.dark_purple())
+            embed = discord.Embed(title="Aria Blaze", description=reply[:4096], color=discord.Color.dark_purple())
             await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error(f"Aria Command Error: {e}")

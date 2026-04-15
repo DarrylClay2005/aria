@@ -62,9 +62,9 @@ class Pacts(commands.Cog):
                                 await message.author.timeout(dt.timedelta(hours=1), reason="Sanity hit 0%")
                             except discord.Forbidden: pass
 
-    pact_group = app_commands.Group(name="pact", description="Make a dangerous deal with Aria")
+    pact_group = app_commands.Group(name="pact", description="Enter or break dangerous bargains with Aria.")
 
-    @pact_group.command(name="sign", description="Sell your mind to Aria for Max Affinity.")
+    @pact_group.command(name="sign", description="Sign a dangerous pact for max affinity at a serious long-term cost.")
     async def sign_pact(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -83,7 +83,7 @@ class Pacts(commands.Cog):
         embed = discord.Embed(title="📜 The Pact is Sealed", description=f"{interaction.user.mention} just made a terrible mistake.\n\n**The Boon:** I have magically decided I love you (Affinity maxed). Your sanity is reset to 100%.\n**The Curse:** Every single time you type a message in this server, I drain 1% of your Sanity. When it hits 0, you break.", color=discord.Color.dark_red())
         await interaction.response.send_message(embed=embed)
 
-    @pact_group.command(name="break", description="Attempt to win your mind back via an AI riddle")
+    @pact_group.command(name="break", description="Try to escape your pact by solving Aria's challenge.")
     async def break_pact(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         async with aiomysql.create_pool(**DB_CONFIG) as pool:

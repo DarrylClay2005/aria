@@ -5,6 +5,7 @@ import aiomysql
 import aiohttp
 import logging
 import io
+import os
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger("discord")
@@ -248,9 +249,9 @@ class ImageOps(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ Network Error: {e}")
 
-    image_group = app_commands.Group(name="image", description="Visual Matrix Operations & Vault Tools")
+    image_group = app_commands.Group(name="image", description="Search, save, and manipulate images with Aria's visual tools.")
 
-    @image_group.command(name="search", description="The Omni-Lens: Instant 4K via Microsoft CDN Hijack.")
+    @image_group.command(name="search", description="Search for images and browse the results in Aria's carousel.")
     async def search(self, interaction: discord.Interaction, query: str):
         await interaction.response.defer()
         try:
@@ -305,7 +306,7 @@ class ImageOps(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ Network Fetch Error: {e}")
 
-    @image_group.command(name="vault", description="Retrieve a permanently saved image from your Visual Vault.")
+    @image_group.command(name="vault", description="Retrieve an image previously saved in the Visual Vault.")
     async def vault_get(self, interaction: discord.Interaction, keyword: str):
         await interaction.response.defer()
         try:
@@ -327,7 +328,7 @@ class ImageOps(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ Vault Fetch Error: {e}")
 
-    @image_group.command(name="forge", description="The Image Forge: Dynamically burn custom text onto a blank canvas.")
+    @image_group.command(name="forge", description="Generate a simple image with custom text burned onto it.")
     async def forge(self, interaction: discord.Interaction, text: str, color: str = "black"):
         await interaction.response.defer()
         try:

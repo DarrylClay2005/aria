@@ -39,9 +39,9 @@ class Confessions(commands.Cog):
                     res = await cur.fetchone()
                     return res[0] if res else 100
 
-    drama_group = app_commands.Group(name="drama", description="Aria's black market for secrets and gossip")
+    drama_group = app_commands.Group(name="drama", description="Trade sanity for secrets, confessions, and server gossip.")
 
-    @drama_group.command(name="confess", description="Submit a juicy secret. Aria restores 10% of your Sanity as a reward.")
+    @drama_group.command(name="confess", description="Submit a secret to Aria and recover a little sanity in return.")
     async def confess(self, interaction: discord.Interaction, secret: str):
         if len(secret) < 10: return await interaction.response.send_message("That secret is too short and boring.", ephemeral=True)
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
@@ -52,7 +52,7 @@ class Confessions(commands.Cog):
         await self.alter_sanity(interaction.user.id, 10)
         await interaction.response.send_message("Secret secured. Feeding me drama appeases me, so I have restored 10% of your Sanity.", ephemeral=True)
 
-    @drama_group.command(name="buy_leak", description="Sacrifice 30% of your Sanity to force Aria to expose a random secret.")
+    @drama_group.command(name="buy_leak", description="Spend sanity to force Aria to reveal a random confession.")
     async def buy_leak(self, interaction: discord.Interaction):
         sanity = await self.get_sanity(interaction.user.id)
         if sanity < 30:

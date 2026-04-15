@@ -12,9 +12,9 @@ class Games(commands.Cog):
         self.bot = bot
 
     # --- THE GAME COMMAND GROUP ---
-    game_group = app_commands.Group(name="game", description="Aria's condescending games")
+    game_group = app_commands.Group(name="game", description="Play trivia and riddles while Aria judges your intelligence.")
 
-    @game_group.command(name="trivia", description="Start a lightning trivia round")
+    @game_group.command(name="trivia", description="Start a fast trivia round and answer before someone else does.")
     async def trivia(self, interaction: discord.Interaction):
         questions = [
             {"q": "What is the capital of Australia?", "a": "canberra"},
@@ -40,7 +40,7 @@ class Games(commands.Cog):
         except asyncio.TimeoutError:
             await interaction.followup.send(f"Time's up, {interaction.user.mention}. Too slow. The answer was **{q['a'].title()}**. Try to keep up.")
 
-    @game_group.command(name="riddle", description="Start a riddle game")
+    @game_group.command(name="riddle", description="Start a riddle challenge and race to solve it.")
     async def riddle(self, interaction: discord.Interaction):
         riddles = [
             {"q": "I speak without a mouth and hear without ears. I have no body, but I come alive with wind. What am I?", "a": "echo"},
@@ -64,9 +64,9 @@ class Games(commands.Cog):
             await interaction.followup.send(f"Boring. You ran out of time. It's an **{r['a']}**.")
 
     # --- THE BATTLE COMMAND GROUP ---
-    battle_group = app_commands.Group(name="battle", description="Feed Aria's need for negative energy")
+    battle_group = app_commands.Group(name="battle", description="Compete in roast battles and feed Aria more chaos.")
 
-    @battle_group.command(name="roast", description="Submit a roast in a roast battle")
+    @battle_group.command(name="roast", description="Submit your line in an active roast battle.")
     async def roast(self, interaction: discord.Interaction, target: discord.Member, insult: str):
         if target == interaction.user:
             return await interaction.response.send_message("Roasting yourself? That's just fucking pathetic. I feed on conflict between *others*, not your sad self-deprecation.", ephemeral=True)

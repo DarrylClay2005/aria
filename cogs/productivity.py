@@ -1,20 +1,16 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiomysql
 import logging
 import asyncio
-from datetime import datetime, timedelta
+import os
 from google import genai
 from google.genai import types
+from core.database import db
 
 logger = logging.getLogger("discord")
 
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
-}
-
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
@@ -23,37 +19,35 @@ class Productivity(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("""
-                        CREATE TABLE IF NOT EXISTS aria_tasks (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            user_id BIGINT,
-                            task_name TEXT,
-                            status VARCHAR(20) DEFAULT 'pending',
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS aria_tasks (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT,
+                        task_name TEXT,
+                        status VARCHAR(20) DEFAULT 'pending',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
-    task_group = app_commands.Group(name="task", description="Aria's begrudging task management system")
+    task_group = app_commands.Group(name="task", description="Manage your task list without pretending you'll remember it.")
 
-    @task_group.command(name="create", description="Create a new task")
+    @task_group.command(name="create", description="Add a new task to your personal queue.")
+    @app_commands.describe(task_name="The task you want Aria to track for you")
     async def task_create(self, interaction: discord.Interaction, task_name: str):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("INSERT INTO aria_tasks (user_id, task_name) VALUES (%s, %s)", (interaction.user.id, task_name))
-                    task_id = cur.lastrowid
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT INTO aria_tasks (user_id, task_name) VALUES (%s, %s)", (interaction.user.id, task_name))
+                task_id = cur.lastrowid
         await interaction.response.send_message(f"Fucking fine. I've added **Task #{task_id}: {task_name}** to your list. Try not to procrastinate on this one, though we both know you will.")
 
-    @task_group.command(name="list", description="List your tasks")
+    @task_group.command(name="list", description="Show your active tasks and their current status.")
     async def task_list(self, interaction: discord.Interaction):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT id, task_name, status FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (interaction.user.id,))
-                    tasks = await cur.fetchall()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT id, task_name, status FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (interaction.user.id,))
+                tasks = await cur.fetchall()
 
         if not tasks:
             return await interaction.response.send_message("Your task list is empty. Either you actually did your work, or you're just lazy. I'm guessing the latter.", ephemeral=True)
@@ -62,24 +56,24 @@ class Productivity(commands.Cog):
         embed = discord.Embed(title="📝 Your Tedious Tasks", description=desc, color=discord.Color.dark_purple())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @task_group.command(name="complete", description="Mark a task as completed")
+    @task_group.command(name="complete", description="Mark one of your tracked tasks as finished.")
+    @app_commands.describe(task_id="The task number to mark as completed")
     async def task_complete(self, interaction: discord.Interaction, task_id: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("UPDATE aria_tasks SET status = 'completed' WHERE id = %s AND user_id = %s", (task_id, interaction.user.id))
-                    if cur.rowcount == 0:
-                        return await interaction.response.send_message(f"Task #{task_id} doesn't exist or isn't yours. Are you hallucinating?", ephemeral=True)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE aria_tasks SET status = 'completed' WHERE id = %s AND user_id = %s", (task_id, interaction.user.id))
+                if cur.rowcount == 0:
+                    return await interaction.response.send_message(f"Task #{task_id} doesn't exist or isn't yours. Are you hallucinating?", ephemeral=True)
         await interaction.response.send_message(f"✅ **Task #{task_id} marked as completed.** Wow. You actually finished something. Mark the calendar.")
 
-    @task_group.command(name="breakdown", description="Aria uses her massive brain to break a complex task into steps")
+    @task_group.command(name="breakdown", description="Have Aria split a task into smaller, actionable steps.")
+    @app_commands.describe(task_id="The task number you want Aria to break down")
     async def task_breakdown(self, interaction: discord.Interaction, task_id: int):
         await interaction.response.defer(thinking=True)
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT task_name FROM aria_tasks WHERE id = %s AND user_id = %s", (task_id, interaction.user.id))
-                    res = await cur.fetchone()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT task_name FROM aria_tasks WHERE id = %s AND user_id = %s", (task_id, interaction.user.id))
+                res = await cur.fetchone()
         
         if not res:
             return await interaction.followup.send("That task doesn't exist. Learn to read your own list.")
@@ -98,16 +92,15 @@ class Productivity(commands.Cog):
         except Exception:
             await interaction.followup.send("My brain hurts from thinking about your pathetic tasks. Figure it out yourself.")
 
-    prod_group = app_commands.Group(name="productivity", description="Tools to fix your awful work ethic")
+    prod_group = app_commands.Group(name="productivity", description="Use Aria's focus tools to bully yourself into progress.")
 
-    @prod_group.command(name="roast", description="Aria ruthlessly mocks your pending schedule")
+    @prod_group.command(name="roast", description="Get roasted based on the unfinished tasks in your queue.")
     async def prod_roast(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT task_name FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (interaction.user.id,))
-                    tasks = await cur.fetchall()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT task_name FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (interaction.user.id,))
+                tasks = await cur.fetchall()
                     
         if not tasks:
             return await interaction.followup.send("You have no tasks. Get a job or a hobby.")
@@ -125,7 +118,7 @@ class Productivity(commands.Cog):
         except Exception:
             await interaction.followup.send("You're so lazy it broke my parser.")
 
-    @prod_group.command(name="pomodoro", description="Start a Pomodoro focus session (25 minutes)")
+    @prod_group.command(name="pomodoro", description="Start a 25-minute focus timer and let Aria call time for you.")
     async def pomodoro(self, interaction: discord.Interaction):
         await interaction.response.send_message(f"🍅 Starting a 25-minute focus timer for {interaction.user.mention}. I expect you to actually work. I'll ping you when it's done.")
         await asyncio.sleep(1500)

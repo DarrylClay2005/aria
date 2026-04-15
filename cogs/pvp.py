@@ -58,9 +58,9 @@ class PvP(commands.Cog):
                     await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE BATTLE COMMAND GROUP ---
-    duel_group = app_commands.Group(name="duel", description="Challenge other humans to 1-on-1 duels")
+    duel_group = app_commands.Group(name="duel", description="Challenge other members to one-on-one battles.")
 
-    @duel_group.command(name="challenge", description="Challenge a user to a duel")
+    @duel_group.command(name="challenge", description="Challenge another member to a duel type Aria supports.")
     @app_commands.choices(battle_type=[
         app_commands.Choice(name="Trivia Duel", value="trivia")
     ])
@@ -75,7 +75,7 @@ class PvP(commands.Cog):
                     
         await interaction.response.send_message(f"⚔️ **CHALLENGE ISSUED!** ⚔️\n\n{interaction.user.mention} has challenged {target.mention} to a **{battle_type.title()} Duel**.\n{target.display_name}, you have 60 seconds to run `/battle accept` before I assume you are a little bitch.")
 
-    @duel_group.command(name="accept", description="Accept a pending battle challenge")
+    @duel_group.command(name="accept", description="Accept a pending duel challenge aimed at you.")
     async def battle_accept(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
         
@@ -128,9 +128,9 @@ class PvP(commands.Cog):
                     await cur.execute("UPDATE aria_battles SET status = 'finished' WHERE id = %s", (battle_id,))
 
     # --- THE TOURNAMENT COMMAND GROUP ---
-    tourney_group = app_commands.Group(name="tournament", description="Manage and join server tournaments")
+    tourney_group = app_commands.Group(name="tournament", description="Create, join, and track server tournaments.")
 
-    @tourney_group.command(name="create", description="[ADMIN] Create a new tournament registration")
+    @tourney_group.command(name="create", description="[ADMIN] Open registration for a new tournament.")
     @app_commands.default_permissions(administrator=True)
     async def t_create(self, interaction: discord.Interaction, name: str, tournament_type: str):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
@@ -141,7 +141,7 @@ class PvP(commands.Cog):
                     
         await interaction.response.send_message(f"🏆 **Tournament Created!**\n\n**Name:** {name}\n**Type:** {tournament_type}\n**ID:** {t_id}\n\nPlayers can now use `/tournament join {t_id}` to register.")
 
-    @tourney_group.command(name="join", description="Join an open tournament")
+    @tourney_group.command(name="join", description="Join a tournament that is currently accepting players.")
     async def t_join(self, interaction: discord.Interaction, tournament_id: int):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -160,7 +160,7 @@ class PvP(commands.Cog):
                     except aiomysql.IntegrityError:
                         await interaction.response.send_message("You are already registered, genius.", ephemeral=True)
 
-    @tourney_group.command(name="status", description="View the player roster for a tournament")
+    @tourney_group.command(name="status", description="View the current roster and status of a tournament.")
     async def t_status(self, interaction: discord.Interaction, tournament_id: int):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:

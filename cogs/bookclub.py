@@ -31,9 +31,9 @@ class BookClub(commands.Cog):
                     await cur.execute("INSERT IGNORE INTO aria_sanity (user_id) VALUES (%s)", (user_id,))
                     await cur.execute("UPDATE aria_sanity SET sanity_level = LEAST(100, GREATEST(0, sanity_level + %s)) WHERE user_id = %s", (amount, user_id))
 
-    bookclub_group = app_commands.Group(name="bookclub", description="Aria's mandatory cultural enrichment program")
+    bookclub_group = app_commands.Group(name="bookclub", description="Run Aria's mandatory manga club and review cycle.")
 
-    @bookclub_group.command(name="start", description="[ADMIN] Force the server to read a critically acclaimed manga")
+    @bookclub_group.command(name="start", description="[ADMIN] Start a new mandatory manga assignment for the server.")
     @app_commands.default_permissions(administrator=True)
     async def start_club(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
@@ -53,7 +53,7 @@ class BookClub(commands.Cog):
         embed.set_image(url=manga['images']['jpg']['large_image_url'])
         await interaction.followup.send(embed=embed)
 
-    @bookclub_group.command(name="review", description="Submit your mandatory review to Aria")
+    @bookclub_group.command(name="review", description="Submit your review for the current book club assignment.")
     async def review(self, interaction: discord.Interaction, your_review: str):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -63,7 +63,7 @@ class BookClub(commands.Cog):
                     await cur.execute("INSERT INTO aria_bookclub_reviews (user_id, review) VALUES (%s, %s) ON DUPLICATE KEY UPDATE review = %s", (interaction.user.id, your_review, your_review))
         await interaction.response.send_message("Review submitted.", ephemeral=True)
 
-    @bookclub_group.command(name="conclude", description="[ADMIN] End book club, judge reviews, punish slackers")
+    @bookclub_group.command(name="conclude", description="[ADMIN] End the session, judge reviews, and punish slackers.")
     @app_commands.default_permissions(administrator=True)
     async def conclude_club(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)

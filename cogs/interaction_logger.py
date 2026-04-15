@@ -55,7 +55,7 @@ class InteractionLogger(commands.Cog):
                     await cur.execute("INSERT INTO aria_logs (user_id, command_name, arguments) VALUES (%s, %s, %s)", (interaction.user.id, command.name, json.dumps(args)))
 
     # Let admins see who the loudest users are
-    @app_commands.command(name="server_activity", description="[ADMIN] See who talks the most in the server")
+    @app_commands.command(name="server_activity", description="[ADMIN] See which members talk the most in this server.")
     @app_commands.default_permissions(administrator=True)
     async def server_activity(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:

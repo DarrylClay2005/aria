@@ -9,5 +9,5 @@ class Monitor:
     async def start(self):
         while True:
             if override_manager.autonomy_enabled:
-                await self.engine.run()
+                await self.engine.run_once()
             await asyncio.sleep(5)

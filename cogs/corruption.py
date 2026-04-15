@@ -47,7 +47,7 @@ class Corruption(commands.Cog):
                     await cur.execute("UPDATE aria_affinity SET score = score + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE BRIBE COMMAND ---
-    @app_commands.command(name="bribe", description="Attempt to buy Aria's affection with Aria Coins")
+    @app_commands.command(name="bribe", description="Offer Aria Coins in exchange for a little more affection.")
     @app_commands.describe(amount="How many coins to offer (Min: 1000)")
     async def bribe(self, interaction: discord.Interaction, amount: int):
         if amount < 1000:
@@ -68,7 +68,7 @@ class Corruption(commands.Cog):
         await interaction.response.send_message(f"You're offering me **{amount} coins**? Fucking fine. I'll take your money. My tolerance for you has temporarily increased by **{affinity_gain} points**. (Current Affinity: {new_affinity})\n\nDon't let it go to your head. I still think you're annoying, just slightly wealthier than I gave you credit for.")
 
     # --- THE STEAL COMMAND ---
-    @app_commands.command(name="steal", description="Attempt to steal coins from another user")
+    @app_commands.command(name="steal", description="Try to steal Aria Coins from another member and hope it works.")
     async def steal(self, interaction: discord.Interaction, target: discord.Member):
         if target.id == interaction.user.id:
             return await interaction.response.send_message("Stealing from yourself? Wow. The bar was on the floor and you brought a shovel.", ephemeral=True)

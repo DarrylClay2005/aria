@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiomysql
 import logging
+import os
 from google import genai
 from google.genai import types
 
@@ -54,9 +55,9 @@ class Bounty(commands.Cog):
                     return res[0] if res else 0
 
     # --- THE BOUNTY COMMAND GROUP ---
-    bounty_group = app_commands.Group(name="bounty", description="Aria's completely unethical bounty system")
+    bounty_group = app_commands.Group(name="bounty", description="Place, review, and claim bounties on server members.")
 
-    @bounty_group.command(name="place", description="Place a coin bounty on a user's head")
+    @bounty_group.command(name="place", description="Put Aria Coins on someone's head and raise the reward pool.")
     async def bounty_place(self, interaction: discord.Interaction, target: discord.Member, amount: int):
         if amount < 500:
             return await interaction.response.send_message("Don't insult me with pocket change. Minimum bounty is 500 coins.", ephemeral=True)
@@ -84,7 +85,7 @@ class Bounty(commands.Cog):
 
         await interaction.response.send_message(f"🎯 **Bounty Registered.**\n{interaction.user.mention} just put money on {target.mention}'s head. The total bounty is now **{total} Aria Coins**.\n\n*Aria grins.* Let the games begin.")
 
-    @bounty_group.command(name="board", description="View all active targets")
+    @bounty_group.command(name="board", description="View the active bounty board and current reward totals.")
     async def bounty_board(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -105,7 +106,7 @@ class Bounty(commands.Cog):
         embed.set_footer(text="Use /bounty claim to attempt a roast and take the money.")
         await interaction.response.send_message(embed=embed)
 
-    @bounty_group.command(name="claim", description="Attempt to claim a bounty by providing a devastating roast")
+    @bounty_group.command(name="claim", description="Try to win a bounty by submitting a roast Aria respects.")
     async def bounty_claim(self, interaction: discord.Interaction, target: discord.Member, roast: str):
         if target == interaction.user:
             return await interaction.response.send_message("You cannot claim a bounty on yourself, fucking idiot.", ephemeral=True)

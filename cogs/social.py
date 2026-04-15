@@ -33,9 +33,9 @@ class Social(commands.Cog):
     async def before_mood_loop(self):
         await self.bot.wait_until_ready()
 
-    social_group = app_commands.Group(name="social", description="Aria's server gossip and social rankings")
+    social_group = app_commands.Group(name="social", description="Review server rankings, influence, and psychological profiles.")
 
-    @social_group.command(name="influence", description="View influence and affinity rankings in the server")
+    @social_group.command(name="influence", description="View the current influence and affinity rankings in the server.")
     async def influence(self, interaction: discord.Interaction):
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -53,7 +53,7 @@ class Social(commands.Cog):
             embed.add_field(name="🗑️ The Absolute Worst", value=bot_str, inline=False)
         await interaction.response.send_message(embed=embed)
 
-    @social_group.command(name="profile", description="Aria generates a brutal psychological profile on a user")
+    @social_group.command(name="profile", description="Generate Aria's psychological profile for a specific member.")
     async def profile(self, interaction: discord.Interaction, target: discord.Member):
         await interaction.response.defer(thinking=True)
         if target.bot: return await interaction.followup.send("I'm not wasting processing power analyzing another bot.")

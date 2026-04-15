@@ -33,9 +33,9 @@ class ToxicProductivity(commands.Cog):
                     await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE TOXIC WORK COMMAND GROUP ---
-    prod_group = app_commands.Group(name="toxic_work", description="Aria's extremely aggressive productivity tools")
+    prod_group = app_commands.Group(name="toxic_work", description="Weaponized productivity tools for chaos and peer pressure.")
 
-    @prod_group.command(name="sabotage", description="Pay coins to inject a fake task into someone's to-do list")
+    @prod_group.command(name="sabotage", description="Pay coins to slip a fake task into someone's task list.")
     @app_commands.describe(fake_task="The embarrassing task you want to assign them")
     async def sabotage(self, interaction: discord.Interaction, target: discord.Member, fake_task: str):
         cost = 500
@@ -59,7 +59,7 @@ class ToxicProductivity(commands.Cog):
                     
         await interaction.response.send_message(f"Teehee. I've charged you **{cost} coins** and silently added **\"{fake_task}\"** to {target.mention}'s task list. They're going to be so confused.")
 
-    @prod_group.command(name="jail", description="Put yourself (or someone else) in a 25-minute Pomodoro timeout")
+    @prod_group.command(name="jail", description="Force a 25-minute focus timeout on yourself or someone else.")
     async def jail(self, interaction: discord.Interaction, target: discord.Member = None):
         user_to_jail = target or interaction.user
         

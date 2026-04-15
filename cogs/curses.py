@@ -50,9 +50,9 @@ class Curses(commands.Cog):
                         pass
 
     # --- THE CURSE COMMAND GROUP ---
-    curse_group = app_commands.Group(name="curse", description="[OWNER] Impose Aria's wrath upon a human")
+    curse_group = app_commands.Group(name="curse", description="[OWNER] Apply or remove Aria's punishments on a member.")
 
-    @curse_group.command(name="stalk", description="Aria will passively-aggressively react to everything this user says")
+    @curse_group.command(name="stalk", description="Make Aria react to a member's messages for a limited time.")
     @app_commands.describe(minutes="How many minutes the curse lasts (default 10)")
     @app_commands.default_permissions(administrator=True) # Admin only!
     async def curse_stalk(self, interaction: discord.Interaction, target: discord.Member, minutes: int = 10):
@@ -64,7 +64,7 @@ class Curses(commands.Cog):
         
         await interaction.response.send_message(f"Oh, I'm going to enjoy this. Stalking {target.mention} for the next **{minutes} minutes**. Every word they speak will be heavily judged.", ephemeral=False)
 
-    @curse_group.command(name="shush", description="Aria will randomly delete 50% of this user's messages")
+    @curse_group.command(name="shush", description="Randomly delete about half of a member's messages for a while.")
     @app_commands.describe(minutes="How many minutes the curse lasts (default 10)")
     @app_commands.default_permissions(administrator=True)
     async def curse_shush(self, interaction: discord.Interaction, target: discord.Member, minutes: int = 10):
@@ -76,7 +76,7 @@ class Curses(commands.Cog):
         
         await interaction.response.send_message(f"Finally, some peace and quiet. Imposing the 'Shush' protocol on {target.mention} for **{minutes} minutes**. Half of everything they say will vanish into the void.", ephemeral=False)
 
-    @curse_group.command(name="lift", description="Lift all curses from a user early")
+    @curse_group.command(name="lift", description="Remove every active curse from a member early.")
     @app_commands.default_permissions(administrator=True)
     async def curse_lift(self, interaction: discord.Interaction, target: discord.Member):
         if target.id in self.active_curses:

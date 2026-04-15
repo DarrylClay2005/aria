@@ -37,7 +37,7 @@ class Affinity(commands.Cog):
                     return result[0] if result else 0
 
     # --- THE AFFINITY COMMANDS ---
-    @app_commands.command(name="affinity", description="Check how much Aria currently tolerates you")
+    @app_commands.command(name="affinity", description="See how much Aria currently likes or tolerates you.")
     async def check_affinity(self, interaction: discord.Interaction):
         score = await self.get_affinity(interaction.user.id)
         
@@ -62,7 +62,7 @@ class Affinity(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     # Owner command to manually alter affinity for testing
-    @app_commands.command(name="set_affinity", description="[OWNER] Manually set someone's affinity score")
+    @app_commands.command(name="set_affinity", description="[OWNER] Manually set a member's affinity score.")
     @app_commands.default_permissions(administrator=True)
     async def set_affinity(self, interaction: discord.Interaction, target: discord.Member, amount: int):
         amount = max(-100, min(100, amount)) # Clamp between -100 and 100

@@ -90,9 +90,9 @@ class Stocks(commands.Cog):
                     await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE STOCK COMMAND GROUP ---
-    stock_group = app_commands.Group(name="stock", description="Aria's highly volatile stock market")
+    stock_group = app_commands.Group(name="stock", description="Buy, sell, and review Aria's volatile stock market.")
 
-    @stock_group.command(name="market", description="View the current stock market prices")
+    @stock_group.command(name="market", description="View the latest market prices for every listed stock.")
     async def stock_market(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -111,7 +111,7 @@ class Stocks(commands.Cog):
         embed.set_footer(text="Invest at your own risk. I will laugh if you lose it all.")
         await interaction.response.send_message(embed=embed)
 
-    @stock_group.command(name="portfolio", description="View the stocks you currently own")
+    @stock_group.command(name="portfolio", description="Review the shares and positions you currently hold.")
     async def stock_portfolio(self, interaction: discord.Interaction):
         async with aiomysql.create_pool(**DB_CONFIG) as pool:
             async with pool.acquire() as conn:
@@ -138,7 +138,7 @@ class Stocks(commands.Cog):
         embed.add_field(name="Total Market Value", value=f"**{total_value} Coins**")
         await interaction.response.send_message(embed=embed)
 
-    @stock_group.command(name="buy", description="Buy shares of a stock")
+    @stock_group.command(name="buy", description="Buy shares of a stock using your Aria Coins.")
     async def stock_buy(self, interaction: discord.Interaction, symbol: str, shares: int):
         symbol = symbol.upper()
         if shares <= 0:
@@ -172,7 +172,7 @@ class Stocks(commands.Cog):
 
         await interaction.response.send_message(f"Fucking fine. You just bought **{shares} shares** of {name} for **{total_cost} coins**. I hope it crashes immediately.")
 
-    @stock_group.command(name="sell", description="Sell shares of a stock")
+    @stock_group.command(name="sell", description="Sell shares from your portfolio back into the market.")
     async def stock_sell(self, interaction: discord.Interaction, symbol: str, shares: int):
         symbol = symbol.upper()
         if shares <= 0:

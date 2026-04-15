@@ -52,9 +52,9 @@ class Ultimatum(commands.Cog):
                     await cur.execute("INSERT IGNORE INTO aria_sanity (user_id) VALUES (%s)", (user_id,))
                     await cur.execute("UPDATE aria_sanity SET sanity_level = LEAST(100, GREATEST(0, sanity_level + %s)) WHERE user_id = %s", (amount, user_id))
 
-    event_group = app_commands.Group(name="event", description="Aria's server-wide psychological experiments")
+    event_group = app_commands.Group(name="event", description="Run server events and Aria's psychological experiments.")
 
-    @event_group.command(name="trolley_problem", description="[ADMIN] Force two users into a Prisoner's Dilemma for their Sanity")
+    @event_group.command(name="trolley_problem", description="[ADMIN] Force two members into a sanity-damaging dilemma event.")
     @app_commands.default_permissions(administrator=True)
     async def trolley_problem(self, interaction: discord.Interaction, user_a: discord.Member, user_b: discord.Member):
         await interaction.response.defer(ephemeral=False)

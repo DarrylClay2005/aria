@@ -2,10 +2,14 @@ import discord
 from discord.ext import commands
 import os
 import logging
+import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 
-# 🟢 LOAD CENTRALIZED .ENV FILE FIRST
-load_dotenv("/home/desmond/Documents/Discord Bots/Music/.env")
+# 🟢 LOAD LOCAL .ENV FILES FIRST
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR.parent / ".env")
 
 # ================================
 # 🧠 ARIA SYSTEM IMPORTS
@@ -23,6 +27,7 @@ logger = logging.getLogger("discord")
 # --- CONFIGURATION ---
 BOT_ENV_PREFIX = "ARIA"
 TOKEN = os.getenv(f"{BOT_ENV_PREFIX}_DISCORD_TOKEN")
+OVERRIDE_USER_ID = os.getenv("ARIA_OVERRIDE_USER_ID", "1304564041863266347")
 
 # ================================
 # 🤖 BOT CLASS
@@ -36,6 +41,7 @@ class AriaBot(commands.Bot):
             command_prefix="a!",
             intents=discord.Intents.all()
         )
+        self.monitor_task = None
 
     async def setup_hook(self):
         # 🟢 Boot the global DB pool BEFORE cogs load
@@ -45,16 +51,25 @@ class AriaBot(commands.Bot):
             os.makedirs('./cogs')
             logger.warning("Created missing './cogs' directory.")
 
-        for filename in os.listdir('./cogs'):
+        failed_extensions = []
+        for filename in sorted(os.listdir('./cogs')):
             if filename.endswith('.py'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
                     logger.info(f"🟢 Successfully loaded core module: {filename}")
                 except Exception as e:
+                    failed_extensions.append(filename)
                     logger.error(f"🔴 Failed to load module {filename}: {e}")
 
         await self.tree.sync()
         logger.info("📡 Aria's global slash commands have been synced!")
+        if failed_extensions:
+            logger.warning("⚠️ Extensions with load failures: %s", ", ".join(failed_extensions))
+
+        try:
+            override_manager.enable_override(int(OVERRIDE_USER_ID))
+        except ValueError:
+            logger.warning("Invalid ARIA_OVERRIDE_USER_ID value: %s", OVERRIDE_USER_ID)
 
     async def close(self):
         # 🟢 Cleanly close the DB pool when the bot shuts down
@@ -87,8 +102,9 @@ async def on_ready():
         status=discord.Status.dnd
     )
 
-    # 🧠 Start autonomous system
-    bot.loop.create_task(monitor.start())
+    # 🧠 Start autonomous system once
+    if bot.monitor_task is None or bot.monitor_task.done():
+        bot.monitor_task = asyncio.create_task(monitor.start())
 
 # ================================
 # 🧠 MAIN MESSAGE HANDLER
@@ -97,9 +113,6 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
-
-    # 🔐 GIVE YOURSELF CONTROL (REPLACE THIS ID)
-    override_manager.enable_override(1304564041863266347)
 
     # 🧠 ARIA PROCESSING (SAFE LAYER)
     try:

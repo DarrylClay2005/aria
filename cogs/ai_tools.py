@@ -45,9 +45,9 @@ class AITools(commands.Cog):
             await interaction.followup.send(chunks[0])
             for chunk in chunks[1:]: await interaction.channel.send(chunk)
 
-    problem_group = app_commands.Group(name="problem", description="Toxic problem-solving")
+    problem_group = app_commands.Group(name="problem", description="Ask Aria for answers, hints, or public humiliation.")
 
-    @problem_group.command(name="lmgtfy", description="Ask Aria a question. Stupid questions inflict Sanity damage.")
+    @problem_group.command(name="lmgtfy", description="Ask Aria a question and risk a sanity penalty for obvious ones.")
     async def lmgtfy(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(thinking=True)
         try:
@@ -80,7 +80,7 @@ class AITools(commands.Cog):
             )
             await self.send_paginated(interaction, res.text)
 
-    @problem_group.command(name="socratic_torture", description="Pop quiz before she helps")
+    @problem_group.command(name="socratic_torture", description="Answer a prerequisite question before Aria agrees to help.")
     async def socratic_torture(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(ephemeral=False)
         
@@ -127,9 +127,9 @@ class AITools(commands.Cog):
             await interaction.channel.send("Time's up, idiot.")
 
 
-    code_group = app_commands.Group(name="code", description="Aria's condescending code review tools")
+    code_group = app_commands.Group(name="code", description="Have Aria review or debug code with maximum judgment.")
 
-    @code_group.command(name="check", description="Aria ruthlessly judges your code for flaws and bad practices.")
+    @code_group.command(name="check", description="Get a harsh review of a code snippet for bugs and bad practices.")
     async def code_check(self, interaction: discord.Interaction, snippet: str):
         await interaction.response.defer(thinking=True)
         score = await self.get_affinity(interaction.user.id)
@@ -149,7 +149,7 @@ class AITools(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"Your code is so catastrophically bad it crashed my parser: {e}")
 
-    @code_group.command(name="debug", description="Aria fixes your broken code because you can't read documentation.")
+    @code_group.command(name="debug", description="Give Aria an error and snippet so she can explain and fix it.")
     async def code_debug(self, interaction: discord.Interaction, error_traceback: str, snippet: str = "None provided"):
         await interaction.response.defer(thinking=True)
         score = await self.get_affinity(interaction.user.id)

@@ -28,9 +28,9 @@ class Casino(commands.Cog):
                     return res[0] if res else 0
 
     # --- THE CASINO COMMAND GROUP ---
-    casino_group = app_commands.Group(name="casino", description="Aria's rigged high-stakes games and taxes")
+    casino_group = app_commands.Group(name="casino", description="Gamble coins in Aria's rigged games and server taxes.")
 
-    @casino_group.command(name="roulette", description="Win 3x your bet, or lose and get timed out for 10 minutes")
+    @casino_group.command(name="roulette", description="Bet coins on roulette for a big payout or a humiliating timeout.")
     @app_commands.describe(bet="How many coins to risk (Min: 1000)")
     async def roulette(self, interaction: discord.Interaction, bet: int):
         if bet < 1000:
@@ -64,7 +64,7 @@ class Casino(commands.Cog):
                         
                         await interaction.response.send_message(f"📉 **YOU LOSE.**\n\nYou just lost **{bet} coins**. The house always wins, fucking idiot. {jail_msg}")
 
-    @casino_group.command(name="taco_tax", description="[OWNER] Aria steals 5% of the entire server's wealth")
+    @casino_group.command(name="taco_tax", description="[OWNER] Collect 5% of everyone's wealth across the server.")
     @app_commands.default_permissions(administrator=True)
     async def taco_tax(self, interaction: discord.Interaction):
         # We only tax people who actually have more than 100 coins

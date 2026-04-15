@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 import aiomysql
 import logging
+import os
 
 logger = logging.getLogger("discord")
 
@@ -26,9 +27,9 @@ class Surveillance(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    surveillance_group = app_commands.Group(name="surveillance", description="Aria's server-wide spy network tools")
+    surveillance_group = app_commands.Group(name="surveillance", description="Let Aria inspect chat activity and call people out.")
 
-    @surveillance_group.command(name="summarize", description="Aria will read recent messages and give you a sarcastic TL;DR")
+    @surveillance_group.command(name="summarize", description="Summarize recent channel messages with Aria's sarcastic commentary.")
     async def summarize(self, interaction: discord.Interaction, limit: int = 100):
         limit = min(200, max(10, limit))
         await interaction.response.defer(ephemeral=False)
@@ -52,7 +53,7 @@ class Surveillance(commands.Cog):
             logger.error(f"Aria Summary Error: {e}")
             await interaction.followup.send("My parser broke trying to read this channel. You all type like toddlers.")
 
-    @surveillance_group.command(name="investigate", description="Aria spies on a specific user's recent chat history and judges them")
+    @surveillance_group.command(name="investigate", description="Analyze one member's recent messages and have Aria profile them.")
     async def investigate(self, interaction: discord.Interaction, target: discord.Member):
         await interaction.response.defer(ephemeral=False)
         
@@ -80,7 +81,7 @@ class Surveillance(commands.Cog):
         except Exception as e:
             await interaction.followup.send("They talk so much nonsense my AI refused to read it.")
 
-    @surveillance_group.command(name="wall_of_shame", description="Publicly expose the worst procrastinators on the server")
+    @surveillance_group.command(name="wall_of_shame", description="Show the members with the worst backlog of unfinished tasks.")
     async def wall_of_shame(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with aiomysql.create_pool(**DB_CONFIG) as pool:

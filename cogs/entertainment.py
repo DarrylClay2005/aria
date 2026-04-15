@@ -5,6 +5,7 @@ import aiomysql
 import logging
 import random
 import asyncio
+import os
 from google import genai
 from google.genai import types
 
@@ -39,7 +40,7 @@ class Entertainment(commands.Cog):
                     await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE SING-OFF COMMAND ---
-    @app_commands.command(name="game_sing", description="Finish the lyrics. Don't disappoint her.")
+    @app_commands.command(name="game_sing", description="Finish a lyric prompt before time runs out and earn or lose coins.")
     async def sing(self, interaction: discord.Interaction):
         lyrics = [
             {"prompt": "Is this the real life? Is this just fantasy?", "answer": "caught in a landslide"},
@@ -71,7 +72,7 @@ class Entertainment(commands.Cog):
 
 
     # --- THE DEBATE CLUB COMMAND ---
-    @app_commands.command(name="battle_debate", description="Challenge another user to a debate. Aria will judge.")
+    @app_commands.command(name="battle_debate", description="Challenge another member to a timed debate and let Aria judge the winner.")
     async def debate(self, interaction: discord.Interaction, opponent: discord.Member):
         if opponent == interaction.user or opponent.bot:
             return await interaction.response.send_message("You can only debate another human. Try making some friends.", ephemeral=True)
