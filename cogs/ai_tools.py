@@ -19,6 +19,26 @@ class AITools(commands.Cog):
     def __init__(self, bot): 
         self.bot = bot
 
+    @staticmethod
+    def _split_text(text: str, limit: int = 1990) -> list[str]:
+        text = (text or "").strip()
+        if not text:
+            return ["I had a response, but the model returned nothing useful."]
+
+        chunks = []
+        remaining = text
+        while len(remaining) > limit:
+            split_at = remaining.rfind("\n", 0, limit)
+            if split_at <= 0:
+                split_at = remaining.rfind(" ", 0, limit)
+            if split_at <= 0:
+                split_at = limit
+            chunks.append(remaining[:split_at].strip())
+            remaining = remaining[split_at:].strip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
+
     async def alter_sanity(self, user_id: int, amount: int):
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -39,11 +59,8 @@ class AITools(commands.Cog):
         else: return base + "Be toxic, swear heavily, and condescend."
 
     async def send_paginated(self, interaction, text: str):
-        if len(text) <= 1990: await interaction.followup.send(text)
-        else:
-            chunks = [text[i:i+1990] for i in range(0, len(text), 1990)]
-            await interaction.followup.send(chunks[0])
-            for chunk in chunks[1:]: await interaction.channel.send(chunk)
+        for chunk in self._split_text(text):
+            await interaction.followup.send(chunk)
 
     problem_group = app_commands.Group(name="problem", description="Ask Aria for answers, hints, or public humiliation.")
 

@@ -19,7 +19,12 @@ class AriaCore:
             override_manager.toggle(True)
             return "Auto ON"
 
+        if not override_manager.autonomy_enabled:
+            return None
+
         intent=await self.parser.parse(msg)
+        if not intent or intent.get("action")=="unknown":
+            return None
 
         try:
             return await router.execute(intent["action"],ctx,intent)

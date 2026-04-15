@@ -71,7 +71,14 @@ class ServerCourt(commands.Cog):
         prompt = f"Judge this lawsuit. Plaintiff ({interaction.user.display_name}, Affinity: {p_affinity}/100) vs Defendant ({target.display_name}, Affinity: {d_affinity}/100). Suing to inflict {amount} Sanity Damage because: '{reason}'. Plaintiff argued: '{p_statement}'. Defendant argued: '{d_statement}'. Be biased toward higher affinity. Swear heavily. End with exactly: 'WINNER: [Name]'"
 
         try:
-            res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are a corrupt, toxic judge."))
+            res = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction="You are a corrupt, toxic judge.")
+                )
+            )
             judgment = res.text
             embed = discord.Embed(title="👩‍⚖️ The Verdict", description=judgment[:4096], color=discord.Color.dark_purple())
             

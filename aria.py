@@ -5,6 +5,7 @@ import logging
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
+from discord import app_commands
 
 # 🟢 LOAD LOCAL .ENV FILES FIRST
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,7 @@ class AriaBot(commands.Bot):
     async def setup_hook(self):
         # 🟢 Boot the global DB pool BEFORE cogs load
         await db.connect()
+        db.patch_legacy_create_pool()
 
         if not os.path.exists('./cogs'):
             os.makedirs('./cogs')
@@ -106,12 +108,37 @@ async def on_ready():
     if bot.monitor_task is None or bot.monitor_task.done():
         bot.monitor_task = asyncio.create_task(monitor.start())
 
+
+def should_run_aria_core(message: discord.Message) -> bool:
+    content = message.content.strip().lower()
+    if not content:
+        return False
+
+    if content.startswith(bot.command_prefix):
+        return False
+
+    legacy_triggers = (
+        "aria disable auto",
+        "aria enable auto",
+        "aria play",
+        "aria pause",
+        "aria skip",
+        "aria stop",
+        "aria fix",
+    )
+    return content.startswith(legacy_triggers)
+
 # ================================
 # 🧠 MAIN MESSAGE HANDLER
 # ================================
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    await bot.process_commands(message)
+
+    if not should_run_aria_core(message):
         return
 
     # 🧠 ARIA PROCESSING (SAFE LAYER)
@@ -122,10 +149,31 @@ async def on_message(message):
             await message.channel.send(response)
 
     except Exception as e:
-        logger.error(f"[ARIA ERROR] {e}")
+        logger.exception("[ARIA ERROR] %s", e)
 
-    # ⚠️ KEEP COMMANDS + COGS WORKING
-    await bot.process_commands(message)
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    original = getattr(error, "original", error)
+    logger.exception("Slash command failed: %s", original)
+
+    message = "That command crashed before it finished. I've logged the error so it can actually be fixed."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    logger.exception("Prefix command failed: %s", error)
+    try:
+        await ctx.send("That command died mid-flight. Check the logs and fix the stack trace.")
+    except discord.HTTPException:
+        pass
 
 # ================================
 # 🔑 START BOT

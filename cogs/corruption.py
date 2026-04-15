@@ -1,15 +1,11 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiomysql
 import logging
 import random
+from core.database import db
 
 logger = logging.getLogger("discord")
-
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
-}
 
 class Corruption(commands.Cog):
     def __init__(self, bot):
@@ -17,34 +13,30 @@ class Corruption(commands.Cog):
 
     # --- HELPER FUNCTIONS ---
     async def get_balance(self, user_id: int) -> int:
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
-                    await cur.execute("SELECT balance FROM aria_economy WHERE user_id = %s", (user_id,))
-                    res = await cur.fetchone()
-                    return res[0] if res else 0
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
+                await cur.execute("SELECT balance FROM aria_economy WHERE user_id = %s", (user_id,))
+                res = await cur.fetchone()
+                return res[0] if res else 0
 
     async def update_balance(self, user_id: int, amount: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     async def get_affinity(self, user_id: int) -> int:
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("INSERT IGNORE INTO aria_affinity (user_id, score) VALUES (%s, 0)", (user_id,))
-                    await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (user_id,))
-                    res = await cur.fetchone()
-                    return res[0] if res else 0
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT IGNORE INTO aria_affinity (user_id, score) VALUES (%s, 0)", (user_id,))
+                await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (user_id,))
+                res = await cur.fetchone()
+                return res[0] if res else 0
 
     async def update_affinity(self, user_id: int, amount: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("UPDATE aria_affinity SET score = score + %s WHERE user_id = %s", (amount, user_id))
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("UPDATE aria_affinity SET score = score + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE BRIBE COMMAND ---
     @app_commands.command(name="bribe", description="Offer Aria Coins in exchange for a little more affection.")
@@ -88,11 +80,10 @@ class Corruption(commands.Cog):
             await self.update_balance(interaction.user.id, steal_amount)
             
             # Add a little negative energy to the vault organically!
-            async with aiomysql.create_pool(**DB_CONFIG) as pool:
-                async with pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute("INSERT IGNORE INTO aria_vault (guild_id, energy_level) VALUES (%s, 0)", (interaction.guild.id,))
-                        await cur.execute("UPDATE aria_vault SET energy_level = energy_level + 5 WHERE guild_id = %s", (interaction.guild.id,))
+            async with db.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("INSERT IGNORE INTO aria_vault (guild_id, energy_level) VALUES (%s, 0)", (interaction.guild.id,))
+                    await cur.execute("UPDATE aria_vault SET energy_level = energy_level + 5 WHERE guild_id = %s", (interaction.guild.id,))
 
             await interaction.response.send_message(f"🥷 Well look at that. You managed to steal **{steal_amount} coins** from {target.mention} without tripping over your own feet.\n\n*Aria absorbs 5% Negative Energy from the theft.*")
         else:

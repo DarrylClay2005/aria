@@ -7,6 +7,7 @@ import aiomysql
 import aiohttp
 import logging
 import random
+import asyncio
 
 logger = logging.getLogger("discord")
 import os
@@ -87,7 +88,14 @@ class BookClub(commands.Cog):
 
         prompt = f"Manga: '{book['title']}'. Reviews: {reviews}. Pick the best review. Output EXACTLY: 'WINNER_ID: [ID]'"
         try:
-            res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze. Be harsh."))
+            res = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction="You are Aria Blaze. Be harsh.")
+                )
+            )
             winner_id = next((int(line.split(":")[1].strip()) for line in res.text.split("\n") if "WINNER_ID:" in line), None)
             
             if winner_id:

@@ -8,13 +8,9 @@ import asyncio
 import os
 from google import genai
 from google.genai import types
+from core.database import db
 
 logger = logging.getLogger("discord")
-
-# --- CONFIGURATION ---
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
-}
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k')
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -33,11 +29,10 @@ class Entertainment(commands.Cog):
 
     # Helper function to get/update balance
     async def update_balance(self, user_id: int, amount: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
-                    await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
+                await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE SING-OFF COMMAND ---
     @app_commands.command(name="game_sing", description="Finish a lyric prompt before time runs out and earn or lose coins.")
@@ -129,10 +124,13 @@ class Entertainment(commands.Cog):
 
         try:
             # Aria's brain judges the debate
-            response = client.models.generate_content(
-                model=MODEL_ID,
-                contents=prompt,
-                config=types.GenerateContentConfig(system_instruction=JUDGE_INSTRUCTION)
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction=JUDGE_INSTRUCTION)
+                )
             )
             
             judgment = response.text

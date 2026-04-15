@@ -5,6 +5,7 @@ from google import genai
 from google.genai import types
 import aiomysql
 import logging
+import asyncio
 
 logger = logging.getLogger("discord")
 import os
@@ -73,7 +74,14 @@ class Confessions(commands.Cog):
         prompt = f"Rewrite this leaked secret dramatically: '{raw_secret}'. Mock whoever submitted it."
         
         try:
-            res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze."))
+            res = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction="You are Aria Blaze.")
+                )
+            )
             embed = discord.Embed(title="👁️ THE VAULT HAS OPENED", description=res.text[:4000], color=discord.Color.magenta())
             embed.set_footer(text=f"Leak funded by {interaction.user.display_name}. They suffered 30% Sanity Damage for this.")
             await interaction.followup.send(embed=embed)

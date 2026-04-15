@@ -60,7 +60,14 @@ class Ultimatum(commands.Cog):
         await interaction.response.defer(ephemeral=False)
         prompt = f"Forcing {user_a.display_name} and {user_b.display_name} into a Prisoner's Dilemma. Coop/Coop = +10 Sanity. Betray = Steal 30 Sanity, Victim loses 50 Sanity. Double Betray = Both lose 40 Sanity. Introduce this game cynically."
         try:
-            res = client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze."))
+            res = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(system_instruction="You are Aria Blaze.")
+                )
+            )
             intro_text = res.text
         except: intro_text = f"{user_a.mention} {user_b.mention}. Betray or Cooperate. Your minds are on the line."
 
