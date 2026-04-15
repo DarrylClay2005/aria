@@ -7,13 +7,9 @@ import logging
 import io
 import os
 from PIL import Image, ImageDraw, ImageFont
+from core.settings import DB_CONFIG, REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
 
 logger = logging.getLogger("discord")
-DB_CONFIG = {'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_music_gws', 'autocommit': True}
-
-# --- OMNI-LENS CREDENTIALS ---
-GOOGLE_API_KEY = "AIzaSyDgEPKxStYYmj-Jn14AXkzR0bchXKDjGIw"
-GOOGLE_CSE_ID = "511a9aa3611554e5c"
 
 class HTTPSessionManager:
     _session = None
@@ -114,8 +110,31 @@ class ImageCarousel(discord.ui.View):
             img.save(in_path, format="PNG")
             
             def run_ai():
-                # VITAL FIX 2: Explicitly point to the /app/models folder so the AI finds its weights
-                subprocess.run(["/app/realesrgan-ncnn-vulkan", "-i", in_path, "-o", out_path, "-s", "4", "-t", "256", "-n", "realesrgan-x4plus-anime", "-m", "/app/models", "-g", "1"], check=True)
+                if not REAL_ESRGAN_BINARY.is_file():
+                    raise FileNotFoundError("Bundled Real-ESRGAN executable is missing.")
+                if not REAL_ESRGAN_MODEL_DIR.is_dir():
+                    raise FileNotFoundError("Bundled Real-ESRGAN model directory is missing.")
+
+                subprocess.run(
+                    [
+                        str(REAL_ESRGAN_BINARY),
+                        "-i",
+                        in_path,
+                        "-o",
+                        out_path,
+                        "-s",
+                        "4",
+                        "-t",
+                        "256",
+                        "-n",
+                        "realesrgan-x4plus-anime",
+                        "-m",
+                        str(REAL_ESRGAN_MODEL_DIR),
+                        "-g",
+                        "1",
+                    ],
+                    check=True,
+                )
             
             await asyncio.to_thread(run_ai)
             

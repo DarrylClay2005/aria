@@ -1,6 +1,7 @@
 import aiomysql
-import os
 import logging
+
+from core.settings import DB_CONFIG
 
 logger = logging.getLogger("discord")
 _ORIGINAL_CREATE_POOL = aiomysql.create_pool
@@ -32,15 +33,8 @@ class DatabaseManager:
         """Initialize the global connection pool."""
         if not self.pool:
             try:
-                self.pool = await _ORIGINAL_CREATE_POOL(
-                    host=os.getenv('ARIA_DB_HOST', '127.0.0.1'),
-                    user=os.getenv('ARIA_DB_USER', 'botuser'),
-                    password=os.getenv('ARIA_DB_PASSWORD', 'swarmpanel'),
-                    db=os.getenv('ARIA_DB_NAME', 'discord_aria'),
-                    autocommit=True,
-                    minsize=1,
-                    maxsize=15
-                )
+                pool_config = {**DB_CONFIG, "minsize": 1, "maxsize": 15}
+                self.pool = await _ORIGINAL_CREATE_POOL(**pool_config)
                 logger.info("🟢 Global Database Pool initialized.")
             except Exception as e:
                 logger.exception("🔴 Failed to initialize database pool: %s", e)

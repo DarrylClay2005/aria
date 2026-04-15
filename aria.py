@@ -1,16 +1,8 @@
 import discord
 from discord.ext import commands
-import os
 import logging
 import asyncio
-from pathlib import Path
-from dotenv import load_dotenv
 from discord import app_commands
-
-# 🟢 LOAD LOCAL .ENV FILES FIRST
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
-load_dotenv(BASE_DIR.parent / ".env")
 
 # ================================
 # 🧠 ARIA SYSTEM IMPORTS
@@ -18,17 +10,13 @@ load_dotenv(BASE_DIR.parent / ".env")
 from aria.aria_core import AriaCore
 from aria.aria_monitor import Monitor
 from core.override import override_manager
-from core.database import db  
+from core.database import db
+from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
 
 # --- LOGGING SETUP ---
 file_handler = logging.FileHandler(filename="aria_core.log", encoding="utf-8", mode="a")
 discord.utils.setup_logging(handler=file_handler, level=logging.INFO)
 logger = logging.getLogger("discord")
-
-# --- CONFIGURATION ---
-BOT_ENV_PREFIX = "ARIA"
-TOKEN = os.getenv(f"{BOT_ENV_PREFIX}_DISCORD_TOKEN")
-OVERRIDE_USER_ID = os.getenv("ARIA_OVERRIDE_USER_ID", "1304564041863266347")
 
 # ================================
 # 🤖 BOT CLASS
@@ -49,22 +37,26 @@ class AriaBot(commands.Bot):
         await db.connect()
         db.patch_legacy_create_pool()
 
-        if not os.path.exists('./cogs'):
-            os.makedirs('./cogs')
-            logger.warning("Created missing './cogs' directory.")
+        if not COGS_DIR.exists():
+            COGS_DIR.mkdir(parents=True, exist_ok=True)
+            logger.warning("Created missing cogs directory.")
 
         failed_extensions = []
-        for filename in sorted(os.listdir('./cogs')):
-            if filename.endswith('.py'):
-                try:
-                    await self.load_extension(f'cogs.{filename[:-3]}')
-                    logger.info(f"🟢 Successfully loaded core module: {filename}")
-                except Exception as e:
-                    failed_extensions.append(filename)
-                    logger.error(f"🔴 Failed to load module {filename}: {e}")
+        loaded_extensions = []
+        cog_files = [path for path in sorted(COGS_DIR.glob("*.py")) if not path.name.startswith("_")]
+        for cog_file in cog_files:
+            extension = f"cogs.{cog_file.stem}"
+            try:
+                await self.load_extension(extension)
+                loaded_extensions.append(cog_file.name)
+                logger.info("🟢 Successfully loaded core module: %s", cog_file.name)
+            except Exception as e:
+                failed_extensions.append(cog_file.name)
+                logger.error("🔴 Failed to load module %s: %s", cog_file.name, e)
 
         await self.tree.sync()
         logger.info("📡 Aria's global slash commands have been synced!")
+        logger.info("🧩 Loaded %s/%s cog modules.", len(loaded_extensions), len(cog_files))
         if failed_extensions:
             logger.warning("⚠️ Extensions with load failures: %s", ", ".join(failed_extensions))
 
