@@ -97,6 +97,7 @@ class ImageCarousel(discord.ui.View):
         self.query = query
         self.results = results
         self.index = 0
+        self.nav_step = 1
         self.message: discord.Message | None = None
         self._sync_button_state()
 
@@ -129,12 +130,14 @@ class ImageCarousel(discord.ui.View):
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.blurple)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.nav_step = -1
         self.index = (self.index - 1) % len(self.results)
         self._sync_button_state()
         await self.cog.refresh_carousel(interaction, self)
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.blurple)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.nav_step = 1
         self.index = (self.index + 1) % len(self.results)
         self._sync_button_state()
         await self.cog.refresh_carousel(interaction, self)
@@ -293,9 +296,35 @@ class ImageOps(commands.Cog):
         embed.set_footer(text=f"Result {index + 1} of {total} | {rendered.width}x{rendered.height}")
         return embed, file
 
+    async def _build_first_renderable_embed(self, view: ImageCarousel) -> tuple[discord.Embed, discord.File]:
+        total = len(view.results)
+        step = view.nav_step if view.nav_step in (-1, 1) else 1
+        last_error: Exception | None = None
+
+        for offset in range(total):
+            candidate_index = (view.index + (offset * step)) % total
+            candidate = view.results[candidate_index]
+            try:
+                embed, file = await self.build_search_embed(view.query, candidate, candidate_index, total)
+                view.index = candidate_index
+                view._sync_button_state()
+                return embed, file
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Skipping non-renderable carousel candidate %s for query %r: %s",
+                    candidate_index,
+                    view.query,
+                    exc,
+                )
+
+        if last_error is None:
+            raise ImagePipelineError("The image carousel has no renderable results.")
+        raise last_error
+
     async def refresh_carousel(self, interaction: discord.Interaction, view: ImageCarousel) -> None:
         try:
-            embed, file = await self.build_search_embed(view.query, view.current, view.index, len(view.results))
+            embed, file = await self._build_first_renderable_embed(view)
             await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
         except Exception as exc:
             logger.exception("Carousel refresh failed: %s", exc)
@@ -442,7 +471,7 @@ class ImageOps(commands.Cog):
                 return
 
             view = ImageCarousel(self, interaction.user.id, query, candidates)
-            embed, file = await self.build_search_embed(query, view.current, view.index, len(view.results))
+            embed, file = await self._build_first_renderable_embed(view)
             view.message = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
         except Exception as exc:
             logger.exception("Image search failed: %s", exc)
