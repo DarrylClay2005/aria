@@ -55,6 +55,20 @@ class IntentParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["drone"], "nexus")
         self.assertEqual(result["data"]["channel_id"], 123456789012345678)
 
+    async def test_parse_natural_language_play_command(self) -> None:
+        result = await self.parser.parse("tell harmonic to play daft punk one more time")
+
+        self.assertEqual(result["action"], "play")
+        self.assertEqual(result["data"]["drone"], "harmonic")
+        self.assertEqual(result["data"]["query"], "daft punk one more time")
+
+    async def test_parse_many_supports_multiple_orders(self) -> None:
+        results = await self.parser.parse_many("pause gws and skip melodic")
+
+        self.assertEqual([item["action"] for item in results], ["pause", "skip"])
+        self.assertEqual(results[0]["data"]["drone"], "gws")
+        self.assertEqual(results[1]["data"]["drone"], "melodic")
+
     async def test_non_control_prompt_stays_unknown(self) -> None:
         result = await self.parser.parse("stop insulting me for five seconds")
 

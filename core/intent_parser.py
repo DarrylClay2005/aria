@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import re
 
-from core.swarm_control import CHANNEL_MENTION_RE, DRONE_NAMES, FILTER_ALIASES, LOOP_ALIASES, extract_drone_name, extract_channel_id
+from core.swarm_control import FILTER_ALIASES, LOOP_ALIASES, DRONE_NAMES, extract_channel_id
 
 
 ALL_SCOPE_MARKERS = ("all", "swarm", "everyone", "global")
 DRONE_PATTERN = "|".join(DRONE_NAMES)
+EXPLICIT_SPLIT_RE = re.compile(r"\s*(?:;|\n+|\band then\b|\bthen\b|\balso\b)\s*", re.IGNORECASE)
 
 
 def _strip_prefix(message: str) -> str:
     cleaned = (message or "").strip()
-    lowered = cleaned.lower()
-    if lowered.startswith("aria "):
-        return cleaned[5:].strip()
-    return cleaned
+    cleaned = re.sub(r"^\s*aria[:,]?\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*hey\s+aria[:,]?\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _clean_clause(message: str) -> str:
+    return (message or "").strip().strip(" ,;.!?")
 
 
 def _extract_scope_token(command: str) -> str | None:
@@ -25,9 +29,21 @@ def _extract_scope_token(command: str) -> str | None:
     return None
 
 
+def _split_multi_command(command: str) -> list[str]:
+    explicit_segments = [_clean_clause(segment) for segment in EXPLICIT_SPLIT_RE.split(command) if _clean_clause(segment)]
+    if len(explicit_segments) > 1:
+        return explicit_segments
+
+    if " and " not in command.lower():
+        return [_clean_clause(command)]
+
+    conjunction_segments = [_clean_clause(segment) for segment in re.split(r"\band\b", command, flags=re.IGNORECASE) if _clean_clause(segment)]
+    return conjunction_segments if len(conjunction_segments) > 1 else [_clean_clause(command)]
+
+
 class IntentParser:
     async def parse(self, message: str):
-        command = _strip_prefix(message)
+        command = _clean_clause(_strip_prefix(message))
         lowered = command.lower().strip()
         if not lowered:
             return {"action": "unknown"}
@@ -101,6 +117,12 @@ class IntentParser:
             if channel_id:
                 return {"action": "swarm_set_home", "data": {"drone": match.group(1).lower(), "channel_id": channel_id}}
 
+        match = re.fullmatch(rf"set\s+({DRONE_PATTERN})\s+home(?:\s+channel)?\s+(?:to\s+)?(.+)", command, flags=re.IGNORECASE)
+        if match:
+            channel_id = extract_channel_id(match.group(2))
+            if channel_id:
+                return {"action": "swarm_set_home", "data": {"drone": match.group(1).lower(), "channel_id": channel_id}}
+
         match = re.fullmatch(r"broadcast\s+(.+)", command, flags=re.IGNORECASE)
         if match:
             return {"action": "swarm_broadcast", "data": {"query": match.group(1).strip()}}
@@ -109,4 +131,47 @@ class IntentParser:
         if match:
             return {"action": "play", "data": {"query": match.group(1).strip(), "drone": (match.group(2) or "").lower() or None}}
 
+        match = re.fullmatch(
+            rf"(?:please\s+)?(?:tell|make|have|ask)\s+(?:the\s+)?(?:bot\s+|node\s+)?({DRONE_PATTERN})\s+(?:to\s+)?play\s+(.+)",
+            command,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return {"action": "play", "data": {"drone": match.group(1).lower(), "query": match.group(2).strip()}}
+
+        match = re.fullmatch(
+            rf"(?:please\s+)?(?:tell|make|have|ask)\s+(?:the\s+)?(?:bot\s+|node\s+)?({DRONE_PATTERN})\s+(?:to\s+)?(pause|resume|skip|stop|leave)",
+            command,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            action = match.group(2).lower()
+            return {"action": action, "data": {"drone": match.group(1).lower()}}
+
+        scope_marker = _extract_scope_token(lowered)
+        if scope_marker and re.search(r"\b(pause|resume|skip|stop|shuffle)\b", lowered):
+            for action in ("pause", "resume", "skip", "stop"):
+                if re.search(rf"\b{action}\b", lowered):
+                    return {"action": action, "data": {"drone": None}}
+            if re.search(r"\bshuffle\b", lowered):
+                return {"action": "swarm_shuffle", "data": {"drone": None}}
+
         return {"action": "unknown"}
+
+    async def parse_many(self, message: str) -> list[dict]:
+        initial = await self.parse(message)
+        if initial.get("action") != "unknown":
+            return [initial]
+
+        command = _clean_clause(_strip_prefix(message))
+        segments = _split_multi_command(command)
+        if len(segments) < 2:
+            return []
+
+        intents = []
+        for segment in segments:
+            parsed = await self.parse(segment)
+            if parsed.get("action") == "unknown":
+                return []
+            intents.append(parsed)
+        return intents

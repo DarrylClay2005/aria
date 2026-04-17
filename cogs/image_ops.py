@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import random
 import urllib.parse
 
 import aiohttp
@@ -98,6 +99,7 @@ class ImageCarousel(discord.ui.View):
         self.results = results
         self.index = 0
         self.nav_step = 1
+        self.failed_indexes: set[int] = set()
         self.message: discord.Message | None = None
         button_ns = f"aria:image:{requester_id}:{id(self)}"
         self.prev_btn = discord.ui.Button(
@@ -232,9 +234,22 @@ class ImageOps(commands.Cog):
 
     async def _fetch_bytes(self, url: str) -> bytes:
         session = await HTTPSessionManager.get_session()
-        async with session.get(url) as response:
-            response.raise_for_status()
-            return await response.read()
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                async with session.get(url, allow_redirects=True) as response:
+                    response.raise_for_status()
+                    payload = await response.read()
+                    if not payload:
+                        raise ImagePipelineError("Image host returned an empty response.")
+                    return payload
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.35 * (attempt + 1))
+        if last_error is None:
+            raise ImagePipelineError("Image host returned no usable payload.")
+        raise last_error
 
     async def _get_best_render(self, candidate: ImageCandidate) -> RenderedImage:
         last_error: Exception | None = None
@@ -257,7 +272,7 @@ class ImageOps(commands.Cog):
         def _run_search() -> list[ImageCandidate]:
             results: list[ImageCandidate] = []
             with DDGS() as ddgs:
-                for row in ddgs.images(query, max_results=20):
+                for row in ddgs.images(query, max_results=40):
                     source_url = (row.get("image") or row.get("thumbnail") or "").strip()
                     preview_url = (row.get("thumbnail") or "").strip() or None
                     page_url = (row.get("url") or "").strip() or None
@@ -267,40 +282,55 @@ class ImageOps(commands.Cog):
             return results
 
         try:
-            return dedupe_candidates(await asyncio.to_thread(_run_search), limit=20)
+            return dedupe_candidates(await asyncio.to_thread(_run_search), limit=32)
         except Exception as exc:
             logger.warning("DuckDuckGo image search failed: %s", exc)
             return []
 
     async def _search_with_bing(self, query: str) -> list[ImageCandidate]:
         query_safe = urllib.parse.quote_plus(query)
-        offsets = (1, 36, 71)
+        offsets = (1, 36, 71, 106)
         headers = {"User-Agent": "Mozilla/5.0"}
         session = await HTTPSessionManager.get_session()
-        html_pages: list[str] = []
+        urls = [
+            "https://www.bing.com/images/search"
+            f"?q={query_safe}&qft=+filterui:imagesize-large&form=HDRSC2&first={offset}"
+            for offset in offsets
+        ]
 
-        for offset in offsets:
-            url = (
-                "https://www.bing.com/images/search"
-                f"?q={query_safe}&qft=+filterui:imagesize-large&form=HDRSC2&first={offset}"
-            )
+        async def _fetch_page(url: str) -> str | None:
             try:
-                async with session.get(url, headers=headers) as response:
+                async with session.get(url, headers=headers, allow_redirects=True) as response:
                     if response.status == 200:
-                        html_pages.append(await response.text())
+                        return await response.text()
             except Exception as exc:
                 logger.warning("Bing image search page fetch failed: %s", exc)
+            return None
+
+        html_pages = [page for page in await asyncio.gather(*(_fetch_page(url) for url in urls)) if page]
 
         candidates: list[ImageCandidate] = []
         for page in html_pages:
-            candidates.extend(extract_bing_image_candidates(page, limit=20))
-        return dedupe_candidates(candidates, limit=20)
+            candidates.extend(extract_bing_image_candidates(page, limit=24))
+        return dedupe_candidates(candidates, limit=32)
 
     async def search_image_candidates(self, query: str) -> list[ImageCandidate]:
-        candidates = await self._search_with_duckduckgo(query)
-        if candidates:
-            return candidates
-        return await self._search_with_bing(query)
+        sources = await asyncio.gather(
+            self._search_with_duckduckgo(query),
+            self._search_with_bing(query),
+            return_exceptions=True,
+        )
+
+        candidates: list[ImageCandidate] = []
+        for source in sources:
+            if isinstance(source, Exception):
+                logger.warning("Image source aggregation failed for %r: %s", query, source)
+                continue
+            candidates.extend(source)
+
+        candidates = dedupe_candidates(candidates, limit=48)
+        random.shuffle(candidates)
+        return candidates
 
     def _pick_upscale_model(self, query: str, candidate: ImageCandidate) -> str:
         probe = " ".join(filter(None, [query, candidate.title, candidate.page_url or ""])).lower()
@@ -329,17 +359,23 @@ class ImageOps(commands.Cog):
         total = len(view.results)
         step = view.nav_step if view.nav_step in (-1, 1) else 1
         last_error: Exception | None = None
+        candidate_indexes = [(view.index + (offset * step)) % total for offset in range(total)]
+        if view.failed_indexes:
+            healthy_indexes = [index for index in candidate_indexes if index not in view.failed_indexes]
+            if healthy_indexes:
+                candidate_indexes = healthy_indexes + [index for index in candidate_indexes if index in view.failed_indexes]
 
-        for offset in range(total):
-            candidate_index = (view.index + (offset * step)) % total
+        for candidate_index in candidate_indexes:
             candidate = view.results[candidate_index]
             try:
                 embed, file = await self.build_search_embed(view.query, candidate, candidate_index, total)
                 view.index = candidate_index
+                view.failed_indexes.discard(candidate_index)
                 view._sync_button_state()
                 return embed, file
             except Exception as exc:
                 last_error = exc
+                view.failed_indexes.add(candidate_index)
                 logger.warning(
                     "Skipping non-renderable carousel candidate %s for query %r: %s",
                     candidate_index,

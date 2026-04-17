@@ -254,6 +254,8 @@ class SwarmController:
         guild_id = guild_id_from_ctx(ctx)
         if not guild_id:
             return "Direct swarm orders only work inside a server."
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         bot_name = normalize_drone_name(drone)
         if not bot_name:
@@ -269,6 +271,10 @@ class SwarmController:
             async with conn.cursor() as cur:
                 await cur.execute(
                     f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, command VARCHAR(50), data TEXT)"
+                )
+                await cur.execute(
+                    f"DELETE FROM discord_music_{bot_name}.{bot_name}_swarm_direct_orders WHERE bot_name = %s AND guild_id = %s AND command = %s",
+                    (bot_name, guild_id, action),
                 )
                 await cur.execute(
                     f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",

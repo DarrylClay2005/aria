@@ -43,15 +43,20 @@ class AriaCore:
             override_manager.toggle(True)
             return "Auto ON"
 
-        intent=await self.parser.parse(msg)
-        if not intent or intent.get("action")=="unknown":
+        intents = await self.parser.parse_many(msg)
+        if not intents:
             return None
 
-        try:
-            return await router.execute(intent["action"],ctx,intent)
-        except Exception as e:
-            r=self.diag.analyze_error(e)
-            return f"{r['error']} | Fix: {r['fix']}"
+        results = []
+        for intent in intents:
+            try:
+                response = await router.execute(intent["action"], ctx, intent)
+                if response:
+                    results.append(response)
+            except Exception as e:
+                r = self.diag.analyze_error(e)
+                results.append(f"{r['error']} | Fix: {r['fix']}")
+        return "\n".join(results) if results else None
 
     async def observe_text(self, *, user_id: int | None, guild_id: int | None, text: str, source_kind: str = "message") -> list[str]:
         return await self.learning.observe_text(user_id, guild_id, text, source_kind=source_kind)
