@@ -33,8 +33,19 @@ class AICore(commands.Cog):
         self.bot = bot
         self.aria_core = getattr(bot, "aria_core", AriaCore())
 
-    async def generate_aria_reply(self, prompt: str, system_instruction: str) -> str:
-        return await self.aria_core.chat(prompt, system_instruction=system_instruction)
+    async def generate_aria_reply(self, prompt: str, system_instruction: str, *, ctx=None) -> str:
+        actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+        guild = getattr(ctx, "guild", None)
+        guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
+        user_name = getattr(actor, "display_name", None) if actor else None
+        user_id = getattr(actor, "id", None) if actor else None
+        return await self.aria_core.chat(
+            prompt,
+            system_instruction=system_instruction,
+            user_id=user_id,
+            guild_id=guild_id,
+            user_name=user_name,
+        )
         
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -44,9 +55,15 @@ class AICore(commands.Cog):
             if not prompt: prompt = "What are you looking at?"
             
             try:
+                control_result = await self.aria_core.handle(message, prompt)
+                if control_result:
+                    await message.reply(control_result)
+                    return
+
                 response_text = await self.generate_aria_reply(
                     prompt,
                     "You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
+                    ctx=message,
                 )
                 await message.reply(response_text or "I had a response ready, but the model returned nothing useful.")
             except AIServiceUnavailable as exc:
@@ -72,6 +89,7 @@ class AICore(commands.Cog):
             response_text = await self.generate_aria_reply(
                 f"The user says: '{prompt}'. Respond to them, mock their taste if necessary, and then pick a superior track. YOU MUST INCLUDE exactly one play tag formatted like [PLAY: Song Name - Artist] at the end of your response.",
                 "You are Aria Blaze. You hate human music taste but love controlling the room. You use your swarm of music bots to force your musical will on the server.",
+                ctx=interaction,
             )
             
             match = re.search(r'\[PLAY:\s*(.+?)\]', response_text)
@@ -134,9 +152,16 @@ class AICore(commands.Cog):
 
         await interaction.response.defer(thinking=True)
         try:
+            control_result = await self.aria_core.handle(interaction, prompt)
+            if control_result:
+                embed = discord.Embed(title="Aria Blaze", description=control_result[:4096], color=discord.Color.dark_purple())
+                await interaction.followup.send(embed=embed)
+                return
+
             reply = await self.generate_aria_reply(
                 prompt,
                 "You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
+                ctx=interaction,
             )
             embed = discord.Embed(title="Aria Blaze", description=reply[:4096], color=discord.Color.dark_purple())
             await interaction.followup.send(embed=embed)

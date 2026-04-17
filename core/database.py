@@ -1,10 +1,14 @@
-import aiomysql
 import logging
 
 from core.settings import DB_CONFIG
 
+try:
+    import aiomysql
+except ImportError:  # pragma: no cover - optional in lightweight local test shells
+    aiomysql = None
+
 logger = logging.getLogger("discord")
-_ORIGINAL_CREATE_POOL = aiomysql.create_pool
+_ORIGINAL_CREATE_POOL = aiomysql.create_pool if aiomysql else None
 
 
 class _SharedPoolProxy:
@@ -32,6 +36,9 @@ class DatabaseManager:
     async def connect(self):
         """Initialize the global connection pool."""
         if not self.pool:
+            if aiomysql is None:
+                logger.error("aiomysql is not installed; database features are unavailable in this environment.")
+                return
             try:
                 pool_config = {**DB_CONFIG, "minsize": 1, "maxsize": 15}
                 self.pool = await _ORIGINAL_CREATE_POOL(**pool_config)
@@ -41,6 +48,8 @@ class DatabaseManager:
 
     def patch_legacy_create_pool(self):
         """Route old aiomysql.create_pool usage to the shared pool."""
+        if aiomysql is None:
+            return
         if getattr(aiomysql.create_pool, "_aria_uses_shared_pool", False):
             return
 

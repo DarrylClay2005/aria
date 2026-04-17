@@ -38,6 +38,7 @@ class AriaBot(commands.Bot):
         # 🟢 Boot the global DB pool BEFORE cogs load
         await db.connect()
         db.patch_legacy_create_pool()
+        await self.aria_core.initialize()
 
         if not COGS_DIR.exists():
             COGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,17 +105,7 @@ def should_run_aria_core(message: discord.Message) -> bool:
 
     if content.startswith(bot.command_prefix):
         return False
-
-    legacy_triggers = (
-        "aria disable auto",
-        "aria enable auto",
-        "aria play",
-        "aria pause",
-        "aria skip",
-        "aria stop",
-        "aria fix",
-    )
-    return content.startswith(legacy_triggers)
+    return content.startswith("aria ")
 
 # ================================
 # 🧠 MAIN MESSAGE HANDLER
@@ -124,6 +115,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    await bot.aria_core.observe_message(message)
     await bot.process_commands(message)
 
     if not should_run_aria_core(message):
