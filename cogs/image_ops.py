@@ -99,6 +99,39 @@ class ImageCarousel(discord.ui.View):
         self.index = 0
         self.nav_step = 1
         self.message: discord.Message | None = None
+        button_ns = f"aria:image:{requester_id}:{id(self)}"
+        self.prev_btn = discord.ui.Button(
+            label="◀ Prev",
+            style=discord.ButtonStyle.blurple,
+            row=0,
+            custom_id=f"{button_ns}:prev",
+        )
+        self.next_btn = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.blurple,
+            row=0,
+            custom_id=f"{button_ns}:next",
+        )
+        self.upscale_btn = discord.ui.Button(
+            label="AI Upscale",
+            style=discord.ButtonStyle.green,
+            row=1,
+            custom_id=f"{button_ns}:upscale",
+        )
+        self.save_btn = discord.ui.Button(
+            label="Save to Vault",
+            style=discord.ButtonStyle.green,
+            row=1,
+            custom_id=f"{button_ns}:save",
+        )
+        self.prev_btn.callback = self._handle_prev
+        self.next_btn.callback = self._handle_next
+        self.upscale_btn.callback = self._handle_upscale
+        self.save_btn.callback = self._handle_save
+        self.add_item(self.prev_btn)
+        self.add_item(self.next_btn)
+        self.add_item(self.upscale_btn)
+        self.add_item(self.save_btn)
         self._sync_button_state()
 
     @property
@@ -128,22 +161,19 @@ class ImageCarousel(discord.ui.View):
             except (discord.HTTPException, discord.NotFound):
                 pass
 
-    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.blurple)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _handle_prev(self, interaction: discord.Interaction) -> None:
         self.nav_step = -1
         self.index = (self.index - 1) % len(self.results)
         self._sync_button_state()
         await self.cog.refresh_carousel(interaction, self)
 
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.blurple)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _handle_next(self, interaction: discord.Interaction) -> None:
         self.nav_step = 1
         self.index = (self.index + 1) % len(self.results)
         self._sync_button_state()
         await self.cog.refresh_carousel(interaction, self)
 
-    @discord.ui.button(label="AI Upscale", style=discord.ButtonStyle.green)
-    async def upscale_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _handle_upscale(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
         try:
             rendered = await self.cog.build_upscaled_image(self.query, self.current)
@@ -162,8 +192,7 @@ class ImageCarousel(discord.ui.View):
                 ephemeral=True,
             )
 
-    @discord.ui.button(label="Save to Vault", style=discord.ButtonStyle.green)
-    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _handle_save(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(VaultTagModal(self.current.source_url))
 
 
@@ -324,8 +353,14 @@ class ImageOps(commands.Cog):
 
     async def refresh_carousel(self, interaction: discord.Interaction, view: ImageCarousel) -> None:
         try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             embed, file = await self._build_first_renderable_embed(view)
-            await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+            target_message = view.message or interaction.message
+            if target_message:
+                await target_message.edit(embed=embed, attachments=[file], view=view)
+            else:
+                await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
         except Exception as exc:
             logger.exception("Carousel refresh failed: %s", exc)
             message = "❌ I couldn't refresh that result. The image host probably blocked the request."
