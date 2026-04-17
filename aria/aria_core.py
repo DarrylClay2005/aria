@@ -1,12 +1,21 @@
 from core.intent_parser import IntentParser
 from core.diagnostics import DiagnosticsEngine
 from core.commands import router
+from core.ai_service import AIService
 from core.override import override_manager
 
+DEFAULT_CHAT_SYSTEM_INSTRUCTION = (
+    "You are Aria Blaze. You are the AI commander of a swarm of music bots. "
+    "You hate human music taste but love controlling the room. "
+    "Be sarcastic, superior, and slightly dismissive."
+)
+
+
 class AriaCore:
-    def __init__(self):
+    def __init__(self, ai_service=None):
         self.parser=IntentParser()
         self.diag=DiagnosticsEngine()
+        self.ai = ai_service or AIService()
 
     async def handle(self,ctx,msg):
         uid=ctx.author.id
@@ -31,3 +40,9 @@ class AriaCore:
         except Exception as e:
             r=self.diag.analyze_error(e)
             return f"{r['error']} | Fix: {r['fix']}"
+
+    async def chat(self, prompt: str, *, system_instruction: str | None = None) -> str:
+        return await self.ai.generate(
+            prompt,
+            system_instruction=system_instruction or DEFAULT_CHAT_SYSTEM_INSTRUCTION,
+        )

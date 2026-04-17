@@ -30,6 +30,8 @@ class AriaBot(commands.Bot):
             command_prefix="a!",
             intents=discord.Intents.all()
         )
+        self.aria_core = AriaCore()
+        self.monitor = Monitor(self)
         self.monitor_task = None
 
     async def setup_hook(self):
@@ -50,9 +52,9 @@ class AriaBot(commands.Bot):
                 await self.load_extension(extension)
                 loaded_extensions.append(cog_file.name)
                 logger.info("🟢 Successfully loaded core module: %s", cog_file.name)
-            except Exception as e:
+            except Exception:
                 failed_extensions.append(cog_file.name)
-                logger.error("🔴 Failed to load module %s: %s", cog_file.name, e)
+                logger.exception("🔴 Failed to load module %s", cog_file.name)
 
         await self.tree.sync()
         logger.info("📡 Aria's global slash commands have been synced!")
@@ -78,12 +80,6 @@ bot = AriaBot()
 # ================================
 # 🧠 ARIA INTELLIGENCE LAYER
 # ================================
-aria = AriaCore()
-monitor = Monitor(bot)
-
-# ================================
-# 🚀 ON READY
-# ================================
 @bot.event
 async def on_ready():
     logger.info(f'🤖 Aria Intelligence Core is online and operating as {bot.user}')
@@ -98,7 +94,7 @@ async def on_ready():
 
     # 🧠 Start autonomous system once
     if bot.monitor_task is None or bot.monitor_task.done():
-        bot.monitor_task = asyncio.create_task(monitor.start())
+        bot.monitor_task = asyncio.create_task(bot.monitor.start())
 
 
 def should_run_aria_core(message: discord.Message) -> bool:
@@ -135,7 +131,7 @@ async def on_message(message):
 
     # 🧠 ARIA PROCESSING (SAFE LAYER)
     try:
-        response = await aria.handle(message, message.content)
+        response = await bot.aria_core.handle(message, message.content)
 
         if response:
             await message.channel.send(response)

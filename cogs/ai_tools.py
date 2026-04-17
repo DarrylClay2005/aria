@@ -1,23 +1,18 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from google import genai
-from google.genai import types
 import logging
 import asyncio
 import urllib.parse
-import os
+from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.5-flash'
-
 class AITools(commands.Cog):
     def __init__(self, bot): 
         self.bot = bot
+        self.ai_service = AIService()
 
     @staticmethod
     def _split_text(text: str, limit: int = 1990) -> list[str]:
@@ -68,14 +63,10 @@ class AITools(commands.Cog):
     async def lmgtfy(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(thinking=True)
         try:
-            eval_res = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                lambda: client.models.generate_content(
-                    model=MODEL_ID, 
-                    contents=f"Rate 'stupidity' of question 1-10: '{question}'. Respond ONLY with integer."
-                )
+            eval_text = await self.ai_service.generate(
+                f"Rate 'stupidity' of question 1-10: '{question}'. Respond ONLY with integer."
             )
-            stupidity = int(''.join(filter(str.isdigit, eval_res.text)))
+            stupidity = int(''.join(filter(str.isdigit, eval_text)))
         except: 
             stupidity = 5
 
@@ -86,62 +77,45 @@ class AITools(commands.Cog):
         else:
             score = await self.get_affinity(interaction.user.id)
             system_inst = self.get_system_instruction(score, interaction.user.display_name)
-            
-            res = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_ID, 
-                    contents=question, 
-                    config=types.GenerateContentConfig(system_instruction=system_inst)
-                )
-            )
-            await self.send_paginated(interaction, res.text)
+
+            try:
+                response_text = await self.ai_service.generate(question, system_instruction=system_inst)
+                await self.send_paginated(interaction, response_text)
+            except AIServiceUnavailable as exc:
+                await interaction.followup.send(exc.public_message)
 
     @problem_group.command(name="socratic_torture", description="Answer a prerequisite question before Aria agrees to help.")
     async def socratic_torture(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer(ephemeral=False)
-        
-        test_q_res = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model=MODEL_ID, 
-                contents=f"Generate 1 prerequisite test question for: '{question}'"
-            )
-        )
-        test_q = test_q_res.text.strip()
+
+        try:
+            test_q = (await self.ai_service.generate(f"Generate 1 prerequisite test question for: '{question}'")).strip()
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
+            return
+
         await interaction.followup.send(f"Answer this in 60 seconds first:\n\n**{test_q}**")
         
         try:
             msg = await self.bot.wait_for('message', timeout=60.0, check=lambda m: m.channel == interaction.channel and m.author.id == interaction.user.id)
-            
-            eval_res = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_ID, 
-                    contents=f"Q: '{test_q}'. A: '{msg.content}'. Correct? 'True' or 'False'."
-                )
-            )
-            
-            if "true" in eval_res.text.lower():
+
+            eval_text = await self.ai_service.generate(f"Q: '{test_q}'. A: '{msg.content}'. Correct? 'True' or 'False'.")
+
+            if "true" in eval_text.lower():
                 await interaction.channel.send("Close enough. Generating answer...")
                 
                 score = await self.get_affinity(interaction.user.id)
                 system_inst = self.get_system_instruction(score, interaction.user.display_name)
-                
-                res = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: client.models.generate_content(
-                        model=MODEL_ID, 
-                        contents=question, 
-                        config=types.GenerateContentConfig(system_instruction=system_inst)
-                    )
-                )
-                await self.send_paginated(interaction, res.text)
+
+                response_text = await self.ai_service.generate(question, system_instruction=system_inst)
+                await self.send_paginated(interaction, response_text)
             else:
                 await self.alter_sanity(interaction.user.id, -15)
                 await interaction.channel.send("WRONG. I've inflicted 15% Sanity Damage. Figure it out yourself.")
         except asyncio.TimeoutError:
             await interaction.channel.send("Time's up, idiot.")
+        except AIServiceUnavailable as exc:
+            await interaction.channel.send(exc.public_message)
 
 
     code_group = app_commands.Group(name="code", description="Have Aria review or debug code with maximum judgment.")
@@ -154,15 +128,13 @@ class AITools(commands.Cog):
         system_inst = self.get_system_instruction(score, interaction.user.display_name) + " You are performing a code review. Be brutal. Point out inefficiencies, bad naming conventions, and logic flaws."
         
         try:
-            res = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_ID, 
-                    contents=f"Review this code:\n\n{snippet}", 
-                    config=types.GenerateContentConfig(system_instruction=system_inst)
-                )
+            response_text = await self.ai_service.generate(
+                f"Review this code:\n\n{snippet}",
+                system_instruction=system_inst,
             )
-            await self.send_paginated(interaction, res.text)
+            await self.send_paginated(interaction, response_text)
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
         except Exception as e:
             await interaction.followup.send(f"Your code is so catastrophically bad it crashed my parser: {e}")
 
@@ -175,15 +147,10 @@ class AITools(commands.Cog):
         
         try:
             prompt = f"The human got this error:\n{error_traceback}\n\nHere is their garbage code:\n{snippet}\n\nTell them exactly why they are stupid and how to fix it."
-            res = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.models.generate_content(
-                    model=MODEL_ID, 
-                    contents=prompt, 
-                    config=types.GenerateContentConfig(system_instruction=system_inst)
-                )
-            )
-            await self.send_paginated(interaction, res.text)
+            response_text = await self.ai_service.generate(prompt, system_instruction=system_inst)
+            await self.send_paginated(interaction, response_text)
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
         except Exception as e:
             await interaction.followup.send(f"Even I can't fix this disaster. Start over. Error: {e}")
 

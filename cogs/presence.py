@@ -1,22 +1,17 @@
 import asyncio
 import discord
 from discord.ext import commands, tasks
-from google import genai
-from google.genai import types
 import logging
 from datetime import datetime, timezone, timedelta
-import os
+from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.5-flash'
-
 class PresenceProfiler(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.ai_service = AIService()
         self.shame_loop.start()
 
     def cog_unload(self):
@@ -58,14 +53,16 @@ class PresenceProfiler(commands.Cog):
                                     prompt = f"Write a brutal 2-sentence public callout for {member.display_name}."
                                     
                                     try:
-                                        res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction=sys_inst)))
-                                        await shame_channel.send(f"{member.mention} 🚨 **PRESENCE ALERT** 🚨\n\n{res.text}")
+                                        response_text = await self.ai_service.generate(prompt, system_instruction=sys_inst)
+                                        await shame_channel.send(f"{member.mention} 🚨 **PRESENCE ALERT** 🚨\n\n{response_text}")
                                         
                                         try:
                                             await member.timeout(timedelta(hours=1), reason="Aria's Touch Grass Protocol")
                                             await shame_channel.send(f"*(I have timed them out for 1 hour so they are forced to go outside.)*")
                                         except discord.Forbidden:
                                             pass
+                                    except AIServiceUnavailable as exc:
+                                        logger.warning("Presence profiler unavailable: %s", exc)
                                     except Exception as e:
                                         logger.error(f"Presence Profiler Error: {e}")
 

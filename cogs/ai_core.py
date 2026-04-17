@@ -1,23 +1,17 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from google import genai
-from google.genai import types
 import aiomysql
 import logging
 import asyncio
 import aiohttp
 import re
 import os
+from aria.aria_core import AriaCore
+from core.ai_service import AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
-
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing from the .env file!")
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.5-flash'
 
 WEBHOOK_URL = os.getenv('ARIA_WEBHOOK_URL')
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
@@ -37,17 +31,10 @@ async def send_webhook_log(bot_name, title, description, color, retries=3):
 class AICore(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.aria_core = getattr(bot, "aria_core", AriaCore())
 
     async def generate_aria_reply(self, prompt: str, system_instruction: str) -> str:
-        response = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.models.generate_content(
-                model=MODEL_ID,
-                contents=prompt,
-                config=types.GenerateContentConfig(system_instruction=system_instruction),
-            ),
-        )
-        return (response.text or "").strip()
+        return await self.aria_core.chat(prompt, system_instruction=system_instruction)
         
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -61,9 +48,12 @@ class AICore(commands.Cog):
                     prompt,
                     "You are Aria Blaze. You are the AI commander of a swarm of music bots. You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
                 )
-                await message.reply(response_text)
+                await message.reply(response_text or "I had a response ready, but the model returned nothing useful.")
+            except AIServiceUnavailable as exc:
+                logger.warning("Aria mention reply unavailable: %s", exc)
+                await message.reply(exc.public_message)
             except Exception as e:
-                logger.error(f"Aria Chat Error: {e}")
+                logger.exception("Aria Chat Error: %s", e)
 
     @app_commands.command(name="aux", description="Have Aria pick a track, roast your taste, and route it to the swarm.")
     @app_commands.describe(prompt="Tell Aria what vibe, genre, or song idea you want her to take over with")
@@ -127,8 +117,11 @@ class AICore(commands.Cog):
                 embed.set_footer(text=f"Swarm Link: Routed through node '{target_drone.capitalize()}'")
             await interaction.followup.send(embed=embed)
             
+        except AIServiceUnavailable as exc:
+            logger.warning("Aux unavailable: %s", exc)
+            await interaction.followup.send(exc.public_message)
         except Exception as e:
-            logger.error(f"Aux Error: {e}")
+            logger.exception("Aux Error: %s", e)
             await interaction.followup.send("My central matrix glitched out trying to process your request. Figure it out yourselves.")
 
 
@@ -147,8 +140,11 @@ class AICore(commands.Cog):
             )
             embed = discord.Embed(title="Aria Blaze", description=reply[:4096], color=discord.Color.dark_purple())
             await interaction.followup.send(embed=embed)
+        except AIServiceUnavailable as exc:
+            logger.warning("Aria command unavailable: %s", exc)
+            await interaction.followup.send(exc.public_message)
         except Exception as e:
-            logger.error(f"Aria Command Error: {e}")
+            logger.exception("Aria Command Error: %s", e)
             await interaction.followup.send("My neural net is currently refusing to process your garbage. Try again later.")
 
 async def setup(bot):

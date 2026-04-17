@@ -4,20 +4,15 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import logging
 import random
-from google import genai
-from google.genai import types
-import os
+from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.5-flash'
-
 class Social(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.ai_service = AIService()
         self.current_mood = "Apathetic"
         self.mood_loop.start()
 
@@ -91,10 +86,12 @@ class Social(commands.Cog):
         prompt = f"Analyze '{target.display_name}'. Affinity: {affinity}/100. Sanity Level: {sanity}%. Unfinished Tasks: {pending_tasks}. Acoustic Profile (Most Played Genres): {music_tastes}.\n\n{tone}\n\nYou MUST actively judge them based on their Acoustic Profile. If they listen to sad music, mock them for wallowing. If they listen to weird genres, call them out."
         
         try:
-            res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt, config=types.GenerateContentConfig(system_instruction="You are Aria Blaze.")))
-            embed = discord.Embed(title=f"📋 Psychological Profile: {target.display_name}", description=res.text[:4096], color=discord.Color.dark_red())
+            response_text = await self.ai_service.generate(prompt, system_instruction="You are Aria Blaze.")
+            embed = discord.Embed(title=f"📋 Psychological Profile: {target.display_name}", description=response_text[:4096], color=discord.Color.dark_red())
             embed.set_thumbnail(url=target.display_avatar.url)
             await interaction.followup.send(embed=embed)
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
         except:
             await interaction.followup.send("They are so incredibly boring my AI refused to profile them.")
 

@@ -1,22 +1,17 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import logging
 import asyncio
-import os
-from google import genai
-from google.genai import types
+import logging
+from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.5-flash'
-
 class Productivity(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.ai_service = AIService()
 
     async def cog_load(self):
         async with db.pool.acquire() as conn:
@@ -82,13 +77,14 @@ class Productivity(commands.Cog):
         prompt = f"The user is too stupid to figure out how to do this task: '{task_name}'. Break it down into 3 or 4 highly detailed, actionable sub-steps. Be incredibly condescending and swear at them for needing an AI to explain how to do basic human functions."
         
         try:
-            ai_res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
-                model=MODEL_ID,
-                contents=prompt,
-                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren."))
+            response_text = await self.ai_service.generate(
+                prompt,
+                system_instruction="You are Aria Blaze, a cynical, highly intelligent siren.",
             )
-            embed = discord.Embed(title=f"🧠 AI Breakdown: Task #{task_id}", description=ai_res.text[:4096], color=discord.Color.blue())
+            embed = discord.Embed(title=f"🧠 AI Breakdown: Task #{task_id}", description=response_text[:4096], color=discord.Color.blue())
             await interaction.followup.send(embed=embed)
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
         except Exception:
             await interaction.followup.send("My brain hurts from thinking about your pathetic tasks. Figure it out yourself.")
 
@@ -109,12 +105,13 @@ class Productivity(commands.Cog):
         prompt = f"The user {interaction.user.display_name} is procrastinating on these tasks: {task_list}. Write a vicious, profanity-laced rant absolutely tearing apart their work ethic, time management, and general life choices."
         
         try:
-            ai_res = await asyncio.get_event_loop().run_in_executor(None, lambda: client.models.generate_content(
-                model=MODEL_ID,
-                contents=prompt,
-                config=types.GenerateContentConfig(system_instruction="You are Aria Blaze, a cynical, highly intelligent siren who hates laziness."))
+            response_text = await self.ai_service.generate(
+                prompt,
+                system_instruction="You are Aria Blaze, a cynical, highly intelligent siren who hates laziness.",
             )
-            await interaction.followup.send(ai_res.text[:1999])
+            await interaction.followup.send(response_text[:1999])
+        except AIServiceUnavailable as exc:
+            await interaction.followup.send(exc.public_message)
         except Exception:
             await interaction.followup.send("You're so lazy it broke my parser.")
 

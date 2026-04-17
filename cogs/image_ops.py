@@ -1,176 +1,168 @@
-import discord
-from discord.ext import commands
-from discord import app_commands
-import aiomysql
-import aiohttp
-import logging
+from __future__ import annotations
+
+import asyncio
 import io
-import os
-from PIL import Image, ImageDraw, ImageFont
-from core.settings import DB_CONFIG, REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
+import logging
+import urllib.parse
+
+import aiohttp
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from core.database import db
+from core.image_pipeline import (
+    ImageCandidate,
+    ImagePipelineError,
+    RenderedImage,
+    dedupe_candidates,
+    extract_bing_image_candidates,
+    render_delivery_image,
+    render_forge_image,
+    render_upscale_fallback,
+    upscale_with_realesrgan,
+)
+from core.settings import REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
 
 logger = logging.getLogger("discord")
 
+
 class HTTPSessionManager:
-    _session = None
-    async def __aenter__(self):
-        if not HTTPSessionManager._session:
-            HTTPSessionManager._session = aiohttp.ClientSession()
-        return HTTPSessionManager._session
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
+    _session: aiohttp.ClientSession | None = None
 
-class DBPoolManager:
-    _pool = None
-    async def __aenter__(self):
-        if not DBPoolManager._pool:
-            DBPoolManager._pool = await aiomysql.create_pool(**DB_CONFIG)
-        return DBPoolManager._pool
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-class FontManager:
-    _font_bytes = None
     @classmethod
-    async def get_font(cls, size=40):
-        if not cls._font_bytes:
-            url = "https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Black.ttf"
-            async with HTTPSessionManager() as session:
-                async with session.get(url) as resp:
-                    cls._font_bytes = await resp.read()
-        return ImageFont.truetype(io.BytesIO(cls._font_bytes), size)
+    async def get_session(cls) -> aiohttp.ClientSession:
+        if cls._session is None or cls._session.closed:
+            timeout = aiohttp.ClientTimeout(total=35, sock_connect=10, sock_read=25)
+            cls._session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers={"User-Agent": "Aria/visual-suite"},
+            )
+        return cls._session
 
-class VaultTagModal(discord.ui.Modal, title='Encrypt Image to Vault'):
+    @classmethod
+    async def close(cls) -> None:
+        if cls._session and not cls._session.closed:
+            await cls._session.close()
+        cls._session = None
+
+
+class VaultTagModal(discord.ui.Modal, title="Encrypt Image to Vault"):
     keyword = discord.ui.TextInput(
-        label='Enter a keyword or tag', 
-        placeholder='e.g., funny cat, server logo, reaction meme', 
-        max_length=100
+        label="Enter a keyword or tag",
+        placeholder="e.g., funny cat, server logo, reaction meme",
+        max_length=100,
     )
 
-    def __init__(self, image_url):
+    def __init__(self, image_url: str):
         super().__init__()
         self.image_url = image_url
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
-            async with DBPoolManager() as pool:
-                async with pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute("CREATE TABLE IF NOT EXISTS aria_visual_vault (id INT AUTO_INCREMENT PRIMARY KEY, keyword VARCHAR(100), image_url TEXT, added_by BIGINT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-                        await cur.execute("INSERT INTO aria_visual_vault (keyword, image_url, added_by) VALUES (%s, %s, %s)", (self.keyword.value, self.image_url, interaction.user.id))
-            await interaction.response.send_message(f"💾 **Encrypted & Stored** inside the Visual Vault under the tag `{self.keyword.value}`!", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Database Write Error: {e}", ephemeral=True)
+            async with db.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS aria_visual_vault (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            keyword VARCHAR(100),
+                            image_url TEXT,
+                            added_by BIGINT,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+                    await cur.execute(
+                        "INSERT INTO aria_visual_vault (keyword, image_url, added_by) VALUES (%s, %s, %s)",
+                        (self.keyword.value, self.image_url, interaction.user.id),
+                    )
+            await interaction.response.send_message(
+                f"💾 **Encrypted & Stored** inside the Visual Vault under the tag `{self.keyword.value}`!",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            logger.exception("Vault save failed: %s", exc)
+            await interaction.response.send_message(
+                f"❌ Database Write Error: {exc}",
+                ephemeral=True,
+            )
+
 
 class ImageCarousel(discord.ui.View):
-    def __init__(self, query, images):
+    def __init__(self, cog: "ImageOps", requester_id: int, query: str, results: list[ImageCandidate]):
         super().__init__(timeout=300)
+        self.cog = cog
+        self.requester_id = requester_id
         self.query = query
-        self.images = images
+        self.results = results
         self.index = 0
+        self.message: discord.Message | None = None
+        self._sync_button_state()
 
-    def update_embed(self):
-        embed = discord.Embed(title=f"🔍 Omni-Lens: {self.query}", color=discord.Color.teal())
-        embed.set_image(url=self.images[self.index])
-        embed.set_footer(text=f"Result {self.index + 1} of {len(self.images)} | Powered by Google API")
-        return embed
+    @property
+    def current(self) -> ImageCandidate:
+        return self.results[self.index]
 
-    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.blurple)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = (self.index - 1) % len(self.images)
-        await interaction.response.edit_message(embed=self.update_embed(), view=self)
+    def _sync_button_state(self) -> None:
+        disable_nav = len(self.results) <= 1
+        self.prev_btn.disabled = disable_nav
+        self.next_btn.disabled = disable_nav
 
-    @discord.ui.button(label="Next ▶️", style=discord.ButtonStyle.blurple)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.index = (self.index + 1) % len(self.images)
-        await interaction.response.edit_message(embed=self.update_embed(), view=self)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who opened this image carousel can drive it.",
+            ephemeral=True,
+        )
+        return False
 
-    @discord.ui.button(label="🤖 True AI Upscale", style=discord.ButtonStyle.green)
-    async def upscale_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⚙️ **Initiating CPU Neural Upscale...** This requires heavy compute and may take 15-30 seconds.", ephemeral=True)
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.HTTPException, discord.NotFound):
+                pass
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.blurple)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.index = (self.index - 1) % len(self.results)
+        self._sync_button_state()
+        await self.cog.refresh_carousel(interaction, self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.blurple)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.index = (self.index + 1) % len(self.results)
+        self._sync_button_state()
+        await self.cog.refresh_carousel(interaction, self)
+
+    @discord.ui.button(label="AI Upscale", style=discord.ButtonStyle.green)
+    async def upscale_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.defer(thinking=True)
         try:
-            import io
-            import os
-            import uuid
-            import subprocess
-            import asyncio
-            from PIL import Image
-            
-            url = self.images[self.index]
-            async with HTTPSessionManager() as session:
-                async with session.get(url) as resp:
-                    data = await resp.read()
-            
-            task_id = uuid.uuid4().hex
-            in_path = f"/tmp/{task_id}_in.png"
-            out_path = f"/tmp/{task_id}_out.png"
-            
-            # VITAL FIX 1: Strip out hidden WebP headers by forcing a pure RGB PNG save
-            img = Image.open(io.BytesIO(data)).convert("RGB")
-            img.save(in_path, format="PNG")
-            
-            def run_ai():
-                if not REAL_ESRGAN_BINARY.is_file():
-                    raise FileNotFoundError("Bundled Real-ESRGAN executable is missing.")
-                if not REAL_ESRGAN_MODEL_DIR.is_dir():
-                    raise FileNotFoundError("Bundled Real-ESRGAN model directory is missing.")
+            rendered = await self.cog.build_upscaled_image(self.query, self.current)
+            file = self.cog.rendered_to_file(rendered, f"aria_upscaled_{self.index + 1}")
 
-                subprocess.run(
-                    [
-                        str(REAL_ESRGAN_BINARY),
-                        "-i",
-                        in_path,
-                        "-o",
-                        out_path,
-                        "-s",
-                        "4",
-                        "-t",
-                        "256",
-                        "-n",
-                        "realesrgan-x4plus-anime",
-                        "-m",
-                        str(REAL_ESRGAN_MODEL_DIR),
-                        "-g",
-                        "1",
-                    ],
-                    check=True,
-                )
-            
-            await asyncio.to_thread(run_ai)
-            
-            # --- THE INTENSITY DIAL (70% AI / 30% Original) ---
-            orig_img = Image.open(in_path).convert("RGBA")
-            ai_img = Image.open(out_path).convert("RGBA")
-            
-            # Scale the original texture up to match the massive new AI dimensions
-            orig_resized = orig_img.resize(ai_img.size, Image.Resampling.LANCZOS)
-            
-            # Blend them together at 70% AI dominance
-            final_img = Image.blend(orig_resized, ai_img, alpha=0.7)
-            
-            # Overwrite the AI output with our custom blended version
-            final_img.save(out_path, format="PNG")
-            # --------------------------------------------------
-            
-            with open(out_path, 'rb') as f:
-                file = discord.File(fp=f, filename="ai_upscaled.png")
-            
-            embed = discord.Embed(title="✨ True AI Enhancement Complete", color=discord.Color.green())
-            embed.set_image(url="attachment://ai_upscaled.png")
-            embed.set_footer(text="Powered by Real-ESRGAN (Multi-Threaded CPU Mode (llvmpipe))")
-            
+            embed = discord.Embed(title="✨ AI Enhancement Complete", color=discord.Color.green())
+            embed.description = self.cog.build_source_value(self.current)
+            embed.set_image(url=f"attachment://{file.filename}")
+            embed.set_footer(text=f"Result {self.index + 1} of {len(self.results)}")
+
             await interaction.followup.send(embed=embed, file=file)
-            
-            # Cleanup temporary files
-            os.remove(in_path)
-            os.remove(out_path)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ True AI Error: {e}")
+        except Exception as exc:
+            logger.exception("Upscale failed: %s", exc)
+            await interaction.followup.send(
+                "❌ I couldn't upscale that image cleanly. The source server may be blocking downloads, or the local model failed.",
+                ephemeral=True,
+            )
 
-    @discord.ui.button(label="💾 Save to Vault", style=discord.ButtonStyle.green)
-    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VaultTagModal(self.images[self.index]))
+    @discord.ui.button(label="Save to Vault", style=discord.ButtonStyle.green)
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(VaultTagModal(self.current.source_url))
+
 
 class ImageOps(commands.Cog):
     def __init__(self, bot):
@@ -178,206 +170,332 @@ class ImageOps(commands.Cog):
         self.ctx_vault = app_commands.ContextMenu(name="💾 Save to Vault", callback=self.save_to_vault_context)
         self.ctx_ocr = app_commands.ContextMenu(name="🔤 Extract Text (OCR)", callback=self.extract_text_context)
         self.ctx_source = app_commands.ContextMenu(name="🔍 Find Anime Source", callback=self.find_source_context)
-        
+
         self.bot.tree.add_command(self.ctx_vault)
         self.bot.tree.add_command(self.ctx_ocr)
         self.bot.tree.add_command(self.ctx_source)
 
-    async def cog_unload(self):
+    def cog_unload(self) -> None:
         self.bot.tree.remove_command(self.ctx_vault.name, type=self.ctx_vault.type)
         self.bot.tree.remove_command(self.ctx_ocr.name, type=self.ctx_ocr.type)
         self.bot.tree.remove_command(self.ctx_source.name, type=self.ctx_source.type)
+        try:
+            asyncio.get_running_loop().create_task(HTTPSessionManager.close())
+        except RuntimeError:
+            pass
 
-    async def _get_image_url(self, message: discord.Message):
+    @staticmethod
+    def rendered_to_file(rendered: RenderedImage, stem: str) -> discord.File:
+        filename = f"{stem}.{rendered.extension}"
+        payload = io.BytesIO(rendered.data)
+        payload.seek(0)
+        return discord.File(fp=payload, filename=filename)
+
+    @staticmethod
+    def build_source_value(candidate: ImageCandidate) -> str:
+        lines = [f"[Open original]({candidate.source_url})"]
+        if candidate.page_url and candidate.page_url != candidate.source_url:
+            lines.append(f"[Open source page]({candidate.page_url})")
+        return "\n".join(lines)
+
+    async def _fetch_bytes(self, url: str) -> bytes:
+        session = await HTTPSessionManager.get_session()
+        async with session.get(url) as response:
+            response.raise_for_status()
+            return await response.read()
+
+    async def _get_best_render(self, candidate: ImageCandidate) -> RenderedImage:
+        last_error: Exception | None = None
+        for url in candidate.download_urls():
+            try:
+                payload = await self._fetch_bytes(url)
+                return render_delivery_image(payload)
+            except Exception as exc:
+                last_error = exc
+        if last_error is None:
+            raise ImagePipelineError("The image candidate had no usable URLs.")
+        raise last_error
+
+    async def _search_with_duckduckgo(self, query: str) -> list[ImageCandidate]:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            return []
+
+        def _run_search() -> list[ImageCandidate]:
+            results: list[ImageCandidate] = []
+            with DDGS() as ddgs:
+                for row in ddgs.images(query, max_results=20):
+                    source_url = (row.get("image") or row.get("thumbnail") or "").strip()
+                    preview_url = (row.get("thumbnail") or "").strip() or None
+                    page_url = (row.get("url") or "").strip() or None
+                    title = (row.get("title") or "").strip() or None
+                    if source_url:
+                        results.append(ImageCandidate(source_url, preview_url, page_url, title))
+            return results
+
+        try:
+            return dedupe_candidates(await asyncio.to_thread(_run_search), limit=20)
+        except Exception as exc:
+            logger.warning("DuckDuckGo image search failed: %s", exc)
+            return []
+
+    async def _search_with_bing(self, query: str) -> list[ImageCandidate]:
+        query_safe = urllib.parse.quote_plus(query)
+        offsets = (1, 36, 71)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        session = await HTTPSessionManager.get_session()
+        html_pages: list[str] = []
+
+        for offset in offsets:
+            url = (
+                "https://www.bing.com/images/search"
+                f"?q={query_safe}&qft=+filterui:imagesize-large&form=HDRSC2&first={offset}"
+            )
+            try:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        html_pages.append(await response.text())
+            except Exception as exc:
+                logger.warning("Bing image search page fetch failed: %s", exc)
+
+        candidates: list[ImageCandidate] = []
+        for page in html_pages:
+            candidates.extend(extract_bing_image_candidates(page, limit=20))
+        return dedupe_candidates(candidates, limit=20)
+
+    async def search_image_candidates(self, query: str) -> list[ImageCandidate]:
+        candidates = await self._search_with_duckduckgo(query)
+        if candidates:
+            return candidates
+        return await self._search_with_bing(query)
+
+    def _pick_upscale_model(self, query: str, candidate: ImageCandidate) -> str:
+        probe = " ".join(filter(None, [query, candidate.title, candidate.page_url or ""])).lower()
+        anime_markers = ("anime", "manga", "waifu", "genshin", "naruto", "bleach", "cosplay")
+        if any(marker in probe for marker in anime_markers):
+            return "realesrgan-x4plus-anime"
+        return "realesrgan-x4plus"
+
+    async def build_search_embed(
+        self,
+        query: str,
+        candidate: ImageCandidate,
+        index: int,
+        total: int,
+    ) -> tuple[discord.Embed, discord.File]:
+        rendered = await self._get_best_render(candidate)
+        file = self.rendered_to_file(rendered, f"aria_search_{index + 1}")
+
+        embed = discord.Embed(title=f"🔍 Omni-Lens: {query}", color=discord.Color.teal())
+        embed.description = self.build_source_value(candidate)
+        embed.set_image(url=f"attachment://{file.filename}")
+        embed.set_footer(text=f"Result {index + 1} of {total} | {rendered.width}x{rendered.height}")
+        return embed, file
+
+    async def refresh_carousel(self, interaction: discord.Interaction, view: ImageCarousel) -> None:
+        try:
+            embed, file = await self.build_search_embed(view.query, view.current, view.index, len(view.results))
+            await interaction.response.edit_message(embed=embed, attachments=[file], view=view)
+        except Exception as exc:
+            logger.exception("Carousel refresh failed: %s", exc)
+            message = "❌ I couldn't refresh that result. The image host probably blocked the request."
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+
+    async def build_upscaled_image(self, query: str, candidate: ImageCandidate) -> RenderedImage:
+        last_error: Exception | None = None
+        model_name = self._pick_upscale_model(query, candidate)
+        for url in candidate.download_urls():
+            try:
+                payload = await self._fetch_bytes(url)
+                try:
+                    return await asyncio.to_thread(
+                        upscale_with_realesrgan,
+                        payload,
+                        binary_path=REAL_ESRGAN_BINARY,
+                        model_dir=REAL_ESRGAN_MODEL_DIR,
+                        model_name=model_name,
+                    )
+                except Exception as exc:
+                    logger.warning("Real-ESRGAN unavailable, using fallback upscale: %s", exc)
+                    return render_upscale_fallback(payload)
+            except Exception as exc:
+                last_error = exc
+        if last_error is None:
+            raise ImagePipelineError("The image candidate had no usable URLs for upscale.")
+        raise last_error
+
+    async def _get_image_url(self, message: discord.Message) -> str | None:
         if message.attachments:
-            for att in message.attachments:
-                if att.content_type and att.content_type.startswith('image/'):
-                    return att.url
+            for attachment in message.attachments:
+                if attachment.content_type and attachment.content_type.startswith("image/"):
+                    return attachment.url
         if message.embeds:
-            for emb in message.embeds:
-                if emb.image and emb.image.url:
-                    return emb.image.url
+            for embed in message.embeds:
+                if embed.image and embed.image.url:
+                    return embed.image.url
+                if embed.thumbnail and embed.thumbnail.url:
+                    return embed.thumbnail.url
         return None
 
-    async def save_to_vault_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def save_to_vault_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
         url = await self._get_image_url(message)
         if not url:
-            return await interaction.response.send_message("❌ The Omni-Lens could not detect a valid image in that message.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ The Omni-Lens could not detect a valid image in that message.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(VaultTagModal(url))
 
-    async def extract_text_context(self, interaction: discord.Interaction, message: discord.Message):
+    async def extract_text_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
         url = await self._get_image_url(message)
-        if not url: return await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
-        await interaction.response.defer(ephemeral=False)
-        
-        api_url = f"https://api.ocr.space/parse/imageurl?apikey=helloworld&url={url}"
-        try:
-            async with HTTPSessionManager() as session:
-                async with session.get(api_url) as resp:
-                    data = await resp.json()
-                    
-            if data.get('IsErroredOnProcessing'):
-                return await interaction.followup.send("❌ OCR Processing Failed.")
-            
-            parsed_results = data.get('ParsedResults')
-            if not parsed_results or not parsed_results[0].get('ParsedText').strip():
-                return await interaction.followup.send("📭 No readable text found in the image.")
-                
-            text = parsed_results[0]['ParsedText']
-            cb = chr(96)*3
-            desc = f"{cb}\n{text[:4000]}\n{cb}"
-            embed = discord.Embed(title="🔤 Optical Character Recognition", description=desc, color=discord.Color.blue())
-            await interaction.followup.send(embed=embed)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Network Error: {e}")
+        if not url:
+            await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
+            return
 
-    async def find_source_context(self, interaction: discord.Interaction, message: discord.Message):
-        url = await self._get_image_url(message)
-        if not url: return await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
         await interaction.response.defer(ephemeral=False)
-        
-        api_url = f"https://api.trace.moe/search?anilistInfo&url={url}"
+        api_url = f"https://api.ocr.space/parse/imageurl?apikey=helloworld&url={url}"
+
         try:
-            async with HTTPSessionManager() as session:
-                async with session.get(api_url) as resp:
-                    data = await resp.json()
-                    
-            if data.get('error'):
-                return await interaction.followup.send(f"❌ Trace.moe Error: {data['error']}")
-                
-            best_match = data['result'][0]
-            similarity = best_match['similarity'] * 100
-            
+            session = await HTTPSessionManager.get_session()
+            async with session.get(api_url) as response:
+                data = await response.json()
+
+            if data.get("IsErroredOnProcessing"):
+                await interaction.followup.send("❌ OCR Processing Failed.")
+                return
+
+            parsed_results = data.get("ParsedResults")
+            if not parsed_results or not parsed_results[0].get("ParsedText", "").strip():
+                await interaction.followup.send("📭 No readable text found in the image.")
+                return
+
+            text = parsed_results[0]["ParsedText"]
+            fence = chr(96) * 3
+            desc = f"{fence}\n{text[:4000]}\n{fence}"
+            embed = discord.Embed(
+                title="🔤 Optical Character Recognition",
+                description=desc,
+                color=discord.Color.blue(),
+            )
+            await interaction.followup.send(embed=embed)
+        except Exception as exc:
+            logger.exception("OCR context action failed: %s", exc)
+            await interaction.followup.send(f"❌ Network Error: {exc}")
+
+    async def find_source_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        url = await self._get_image_url(message)
+        if not url:
+            await interaction.response.send_message("❌ No valid image found.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=False)
+        api_url = f"https://api.trace.moe/search?anilistInfo&url={url}"
+
+        try:
+            session = await HTTPSessionManager.get_session()
+            async with session.get(api_url) as response:
+                data = await response.json()
+
+            if data.get("error"):
+                await interaction.followup.send(f"❌ Trace.moe Error: {data['error']}")
+                return
+
+            result = data["result"][0]
+            similarity = result["similarity"] * 100
             if similarity < 70:
-                return await interaction.followup.send(f"⚠️ No confident matches found. Best guess was {similarity:.1f}% accurate.")
-                
-            anime_title = best_match['anilist']['title'].get('romaji') or best_match['anilist']['title'].get('english')
-            episode = best_match.get('episode', 'Movie/OVA')
-            minutes, seconds = divmod(int(best_match['from']), 60)
-            
+                await interaction.followup.send(
+                    f"⚠️ No confident matches found. Best guess was {similarity:.1f}% accurate."
+                )
+                return
+
+            anime_title = result["anilist"]["title"].get("romaji") or result["anilist"]["title"].get("english")
+            episode = result.get("episode", "Movie/OVA")
+            minutes, seconds = divmod(int(result["from"]), 60)
+
             embed = discord.Embed(title="🔍 Anime Source Detective", color=discord.Color.purple())
             embed.add_field(name="Anime", value=f"**{anime_title}**", inline=False)
             embed.add_field(name="Episode", value=str(episode), inline=True)
             embed.add_field(name="Timestamp", value=f"{minutes}:{seconds:02d}", inline=True)
             embed.add_field(name="Confidence", value=f"{similarity:.1f}%", inline=True)
-            embed.set_image(url=best_match['image'])
-            
+            embed.set_image(url=result["image"])
+
             await interaction.followup.send(embed=embed)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Network Error: {e}")
+        except Exception as exc:
+            logger.exception("Anime source lookup failed: %s", exc)
+            await interaction.followup.send(f"❌ Network Error: {exc}")
 
     image_group = app_commands.Group(name="image", description="Search, save, and manipulate images with Aria's visual tools.")
 
     @image_group.command(name="search", description="Search for images and browse the results in Aria's carousel.")
-    async def search(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer()
-        try:
-            import urllib.parse
-            import re
-            import asyncio
-            import random
-            
-            query_safe = urllib.parse.quote(query)
-            
-            # Ghost Protocol V8: The Dynamic Randomizer
-            # Pull 3 completely random pages between 1 and 400 so every search is unique!
-            offsets = random.sample(range(1, 400, 35), 3)
-            urls = [f"https://www.bing.com/images/search?q={query_safe}&qft=+filterui:imagesize-wallpaper&form=HDRSC2&first={offset}" for offset in offsets]
-            
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            
-            raw_turls = []
-            async with HTTPSessionManager() as session:
-                tasks = [session.get(u, headers=headers) for u in urls]
-                responses = await asyncio.gather(*tasks, return_exceptions=True)
-                for resp in responses:
-                    if not isinstance(resp, Exception) and resp.status == 200:
-                        html = await resp.text()
-                        raw_turls.extend(re.findall(r'turl&quot;:&quot;(.*?)&quot;', html))
-            
-            # Shuffle the raw links so the carousel order is completely unpredictable
-            random.shuffle(raw_turls)
-            
-            unique_urls = []
-            for turl in raw_turls:
-                if turl.startswith('http'):
-                    # Delete the size limits to grab the 4K original
-                    high_res_cdn = re.sub(r'&w=\d+', '', turl)
-                    high_res_cdn = re.sub(r'&h=\d+', '', high_res_cdn)
-                    high_res_cdn = re.sub(r'&c=\d+', '', high_res_cdn)
-                    high_res_cdn = re.sub(r'&pid=\w+', '&pid=ImgDetMain', high_res_cdn)
+    async def search(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(thinking=True)
 
-                    if high_res_cdn not in unique_urls:
-                        unique_urls.append(high_res_cdn)
-                        
-                # Bumped the limit to 20 for more variety!
-                if len(unique_urls) >= 20:
-                    break
-            
-            if not unique_urls:
-                return await interaction.followup.send(f"❌ The Omni-Lens found zero matches for `{query}`.")
-                
-            view = ImageCarousel(query, unique_urls)
-            await interaction.followup.send(embed=view.update_embed(), view=view)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Network Fetch Error: {e}")
+        try:
+            candidates = await self.search_image_candidates(query)
+            if not candidates:
+                await interaction.followup.send(f"❌ The Omni-Lens found zero matches for `{query}`.")
+                return
+
+            view = ImageCarousel(self, interaction.user.id, query, candidates)
+            embed, file = await self.build_search_embed(query, view.current, view.index, len(view.results))
+            view.message = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
+        except Exception as exc:
+            logger.exception("Image search failed: %s", exc)
+            await interaction.followup.send(f"❌ Network Fetch Error: {exc}")
 
     @image_group.command(name="vault", description="Retrieve an image previously saved in the Visual Vault.")
-    async def vault_get(self, interaction: discord.Interaction, keyword: str):
+    async def vault_get(self, interaction: discord.Interaction, keyword: str) -> None:
         await interaction.response.defer()
         try:
-            async with DBPoolManager() as pool:
-                async with pool.acquire() as conn:
-                    async with conn.cursor(aiomysql.DictCursor) as cur:
-                        await cur.execute("CREATE TABLE IF NOT EXISTS aria_visual_vault (id INT AUTO_INCREMENT PRIMARY KEY, keyword VARCHAR(100), image_url TEXT, added_by BIGINT, added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-                        
-                        await cur.execute("SELECT image_url, added_by FROM aria_visual_vault WHERE keyword LIKE %s ORDER BY RAND() LIMIT 1", (f"%{keyword}%",))
-                        res = await cur.fetchone()
-                        
-                        if not res:
-                            return await interaction.followup.send(f"📭 The Visual Vault contains no records for `{keyword}`.")
-                            
-                        embed = discord.Embed(title=f"🔐 Vault Record: {keyword}", color=discord.Color.gold())
-                        embed.set_image(url=res['image_url'])
-                        embed.set_footer(text=f"Archived by User ID: {res['added_by']}")
-                        await interaction.followup.send(embed=embed)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Vault Fetch Error: {e}")
+            async with db.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS aria_visual_vault (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            keyword VARCHAR(100),
+                            image_url TEXT,
+                            added_by BIGINT,
+                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+                    await cur.execute(
+                        "SELECT image_url, added_by FROM aria_visual_vault WHERE keyword LIKE %s ORDER BY RAND() LIMIT 1",
+                        (f"%{keyword}%",),
+                    )
+                    result = await cur.fetchone()
+
+            if not result:
+                await interaction.followup.send(f"📭 The Visual Vault contains no records for `{keyword}`.")
+                return
+
+            embed = discord.Embed(title=f"🔐 Vault Record: {keyword}", color=discord.Color.gold())
+            embed.set_image(url=result[0])
+            embed.set_footer(text=f"Archived by User ID: {result[1]}")
+            await interaction.followup.send(embed=embed)
+        except Exception as exc:
+            logger.exception("Vault fetch failed: %s", exc)
+            await interaction.followup.send(f"❌ Vault Fetch Error: {exc}")
 
     @image_group.command(name="forge", description="Generate a simple image with custom text burned onto it.")
-    async def forge(self, interaction: discord.Interaction, text: str, color: str = "black"):
+    async def forge(self, interaction: discord.Interaction, text: str, color: str = "black") -> None:
         await interaction.response.defer()
         try:
-            canvas_color = color.lower() if color.isalpha() else "#1E1E2E"
-            img = Image.new('RGB', (1200, 630), color=canvas_color)
-            draw = ImageDraw.Draw(img)
-            
-            font = await FontManager.get_font(size=80)
-            
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            
-            x = (img.width - text_width) / 2
-            y = (img.height - text_height) / 2
-            
-            draw.text((x+4, y+4), text, font=font, fill="black")
-            draw.text((x, y), text, font=font, fill="white")
-            
-            with io.BytesIO() as image_binary:
-                img.save(image_binary, 'PNG')
-                image_binary.seek(0)
-                file = discord.File(fp=image_binary, filename='forge_output.png')
-                
+            rendered = render_forge_image(text, background_color=color)
+            file = self.rendered_to_file(rendered, "forge_output")
             embed = discord.Embed(title="⚒️ The Image Forge", color=discord.Color.dark_theme())
-            embed.set_image(url="attachment://forge_output.png")
+            embed.set_image(url=f"attachment://{file.filename}")
             await interaction.followup.send(embed=embed, file=file)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Forge Error: {e}")
+        except Exception as exc:
+            logger.exception("Forge render failed: %s", exc)
+            await interaction.followup.send(f"❌ Forge Error: {exc}")
+
 
 async def setup(bot):
     await bot.add_cog(ImageOps(bot))

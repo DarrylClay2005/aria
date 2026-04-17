@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency in some local shells
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 BOT_ENV_PREFIX = "ARIA"
@@ -52,6 +56,7 @@ def prefixed_env(name: str, default: str = "") -> str:
 
 TOKEN = prefixed_env("DISCORD_TOKEN", "").strip()
 OVERRIDE_USER_ID = prefixed_env("OVERRIDE_USER_ID", _DEFAULT_OVERRIDE_USER_ID).strip()
+GEMINI_MODEL_ID = prefixed_env("GEMINI_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
 DB_CONFIG = {
     "host": prefixed_env("DB_HOST", "127.0.0.1"),
     "user": prefixed_env("DB_USER", "botuser"),
