@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import random
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from core.intent_parser import IntentParser
 from core.learning import build_dynamic_insult, extract_candidate_terms
+from core.swarm_control import SwarmController
 
 
 class LearningHelpersTests(unittest.TestCase):
@@ -56,6 +59,31 @@ class IntentParserTests(unittest.IsolatedAsyncioTestCase):
         result = await self.parser.parse("stop insulting me for five seconds")
 
         self.assertEqual(result["action"], "unknown")
+
+
+class SwarmControllerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_leave_targets_active_drone_before_fallback(self) -> None:
+        controller = SwarmController()
+        ctx = SimpleNamespace(guild=SimpleNamespace(id=42), guild_id=42)
+
+        with patch.object(controller, "active_drones", AsyncMock(return_value=["nexus"])), patch.object(
+            controller,
+            "direct",
+            AsyncMock(return_value="Injected `LEAVE` directly into `nexus`."),
+        ) as direct_mock:
+            result = await controller.leave(ctx)
+
+        direct_mock.assert_awaited_once_with(ctx, "nexus", "LEAVE")
+        self.assertEqual(result, "Injected `LEAVE` directly into `nexus`.")
+
+    async def test_leave_requires_explicit_node_when_no_target_is_resolved(self) -> None:
+        controller = SwarmController()
+        ctx = SimpleNamespace(guild=SimpleNamespace(id=42), guild_id=42, author=SimpleNamespace(voice=None))
+
+        with patch.object(controller, "active_drones", AsyncMock(return_value=[])):
+            result = await controller.leave(ctx)
+
+        self.assertEqual(result, "I couldn't identify which swarm node should leave. Name the node explicitly.")
 
 
 if __name__ == "__main__":

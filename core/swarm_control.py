@@ -26,6 +26,20 @@ FILTER_ALIASES = {
 }
 LOOP_ALIASES = {"off": "off", "song": "song", "queue": "queue"}
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
+GUILD_SETTINGS_COLUMNS = (
+    ("home_vc_id", "BIGINT"),
+    ("volume", "INT DEFAULT 100"),
+    ("loop_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("filter_mode", "VARCHAR(20) DEFAULT 'none'"),
+    ("dj_role_id", "BIGINT DEFAULT NULL"),
+    ("feedback_channel_id", "BIGINT DEFAULT NULL"),
+    ("transition_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("custom_speed", "FLOAT DEFAULT 1.0"),
+    ("custom_pitch", "FLOAT DEFAULT 1.0"),
+    ("custom_modifiers_left", "INT DEFAULT 0"),
+    ("dj_only_mode", "BOOLEAN DEFAULT FALSE"),
+    ("stay_in_vc", "BOOLEAN DEFAULT FALSE"),
+)
 
 
 def normalize_drone_name(name: str | None) -> str | None:
@@ -97,6 +111,21 @@ def is_admin_or_override(ctx) -> bool:
         return True
     perms = getattr(actor, "guild_permissions", None)
     return bool(perms and perms.administrator)
+
+
+async def ensure_guild_settings_schema(cur, bot_name: str) -> None:
+    await cur.execute(
+        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings "
+        "(guild_id BIGINT PRIMARY KEY)"
+    )
+    for column_name, definition in GUILD_SETTINGS_COLUMNS:
+        try:
+            await cur.execute(
+                f"ALTER TABLE discord_music_{bot_name}.{bot_name}_guild_settings "
+                f"ADD COLUMN {column_name} {definition}"
+            )
+        except Exception:
+            pass
 
 
 class SwarmController:
@@ -250,6 +279,38 @@ class SwarmController:
             return f"Queued `{data}` through `{bot_name}`."
         return f"Injected `{action}` directly into `{bot_name}`."
 
+    async def leave(self, ctx, *, drone: str | None = None) -> str:
+        guild_id = guild_id_from_ctx(ctx)
+        if not guild_id:
+            return "Direct swarm orders only work inside a server."
+
+        preferred = normalize_drone_name(drone)
+        if preferred:
+            return await self.direct(ctx, preferred, "LEAVE")
+
+        active = await self.active_drones(guild_id)
+        if active:
+            return await self.direct(ctx, active[0], "LEAVE")
+
+        requested_vc_id = voice_channel_id_from_ctx(ctx)
+        if requested_vc_id and db.pool:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(self._dict_cursor()) as cur:
+                    for candidate in DRONE_NAMES:
+                        try:
+                            await cur.execute(
+                                f"SELECT home_vc_id FROM discord_music_{candidate}.{candidate}_bot_home_channels "
+                                "WHERE guild_id = %s LIMIT 1",
+                                (guild_id,),
+                            )
+                            row = await cur.fetchone()
+                        except Exception:
+                            row = None
+                        if row and row.get("home_vc_id") == requested_vc_id:
+                            return await self.direct(ctx, candidate, "LEAVE")
+
+        return "I couldn't identify which swarm node should leave. Name the node explicitly."
+
     async def broadcast(self, ctx, query: str) -> str:
         if not is_admin_or_override(ctx):
             return "You do not have clearance to broadcast orders across the swarm."
@@ -339,9 +400,7 @@ class SwarmController:
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for bot_name in targets:
-                    await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings (guild_id BIGINT PRIMARY KEY, loop_mode VARCHAR(10) DEFAULT 'off', volume INT DEFAULT 100, filter_mode VARCHAR(20) DEFAULT 'none')"
-                    )
+                    await ensure_guild_settings_schema(cur, bot_name)
                     await cur.execute(
                         f"INSERT INTO discord_music_{bot_name}.{bot_name}_guild_settings (guild_id, loop_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE loop_mode = %s",
                         (guild_id, mode_name, mode_name),
@@ -449,13 +508,7 @@ class SwarmController:
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for bot_name in targets:
-                    await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings (guild_id BIGINT PRIMARY KEY, loop_mode VARCHAR(10) DEFAULT 'off', volume INT DEFAULT 100, filter_mode VARCHAR(20) DEFAULT 'none')"
-                    )
-                    try:
-                        await cur.execute(f"ALTER TABLE discord_music_{bot_name}.{bot_name}_guild_settings ADD COLUMN filter_mode VARCHAR(20) DEFAULT 'none'")
-                    except Exception:
-                        pass
+                    await ensure_guild_settings_schema(cur, bot_name)
                     await cur.execute(
                         f"INSERT INTO discord_music_{bot_name}.{bot_name}_guild_settings (guild_id, filter_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE filter_mode = %s",
                         (guild_id, normalized, normalized),

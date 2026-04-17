@@ -7,6 +7,7 @@ import random
 import aiohttp
 import os
 from core.database import db
+from core.swarm_control import ensure_guild_settings_schema
 
 class HTTPSessionManager:
     _session = None
@@ -272,7 +273,7 @@ class SwarmAdmin(commands.Cog):
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     for b in bots:
-                        await cur.execute(f"CREATE TABLE IF NOT EXISTS discord_music_{b}.{b}_guild_settings (guild_id BIGINT PRIMARY KEY, loop_mode VARCHAR(10) DEFAULT 'off', volume INT DEFAULT 100, filter_mode VARCHAR(20) DEFAULT 'none')")
+                        await ensure_guild_settings_schema(cur, b)
                         await cur.execute(f"INSERT INTO discord_music_{b}.{b}_guild_settings (guild_id, loop_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE loop_mode = %s", (interaction.guild_id, mode.value, mode.value))
             msg = f"🔁 **Loop Mode:** Set to `{mode.name}` for `{drone.name}`." if drone else f"☢️ **GLOBAL LOOP:** Set to `{mode.name}` for ALL nodes."
             await interaction.followup.send(msg)
@@ -375,9 +376,7 @@ class SwarmAdmin(commands.Cog):
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     for b in bots:
-                        await cur.execute(f"CREATE TABLE IF NOT EXISTS discord_music_{b}.{b}_guild_settings (guild_id BIGINT PRIMARY KEY, loop_mode VARCHAR(10) DEFAULT 'off', volume INT DEFAULT 100, filter_mode VARCHAR(20) DEFAULT 'none')")
-                        try: await cur.execute(f"ALTER TABLE discord_music_{b}.{b}_guild_settings ADD COLUMN filter_mode VARCHAR(20) DEFAULT 'none'")
-                        except: pass
+                        await ensure_guild_settings_schema(cur, b)
                         await cur.execute(f"INSERT INTO discord_music_{b}.{b}_guild_settings (guild_id, filter_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE filter_mode = %s", (interaction.guild_id, filter_type.value, filter_type.value))
                         await cur.execute(f"CREATE TABLE IF NOT EXISTS discord_music_{b}.{b}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
                         await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (interaction.guild_id, b, "UPDATE_FILTER"))

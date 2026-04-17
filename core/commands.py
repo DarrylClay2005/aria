@@ -40,8 +40,7 @@ async def stop(ctx,intent):
 
 @router.register("leave")
 async def leave(ctx,intent):
-    drone = intent.get("data", {}).get("drone") or "gws"
-    return await swarm_controller.direct(ctx, drone, "LEAVE")
+    return await swarm_controller.leave(ctx, drone=intent.get("data", {}).get("drone"))
 
 @router.register("swarm_radar")
 async def swarm_radar(ctx, intent):
