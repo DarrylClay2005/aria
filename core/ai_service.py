@@ -29,7 +29,11 @@ class AIService:
         system_limit: int = DEFAULT_SYSTEM_LIMIT,
     ):
         self.model_id = (model_id or GEMINI_MODEL_ID).strip() or "gemini-2.5-flash"
-        self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        self.api_key = (
+            api_key
+            or os.getenv("ARIA_GEMINI_API_KEY", "")
+            or os.getenv("GEMINI_API_KEY", "")
+        ).strip()
         self.timeout_seconds = max(20, int(timeout_seconds))
         self.prompt_limit = max(2048, int(prompt_limit))
         self.system_limit = max(1024, int(system_limit))

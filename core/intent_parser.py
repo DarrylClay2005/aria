@@ -14,6 +14,7 @@ def _strip_prefix(message: str) -> str:
     cleaned = (message or "").strip()
     cleaned = re.sub(r"^\s*aria[:,]?\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^\s*hey\s+aria[:,]?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:execute|run)\s+", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
 
@@ -100,7 +101,7 @@ class IntentParser:
                     drone = None
                 return {"action": "swarm_filter", "data": {"filter_type": filter_name, "drone": drone}}
 
-        match = re.fullmatch(rf"(pause|resume|skip|stop)(?:\s+({DRONE_PATTERN}|all|swarm))?", lowered)
+        match = re.fullmatch(rf"(?:execute\s+|run\s+)?(pause|resume|skip|stop)(?:\s+({DRONE_PATTERN}|all|swarm))?", lowered)
         if match:
             drone = match.group(2)
             if drone in ALL_SCOPE_MARKERS:

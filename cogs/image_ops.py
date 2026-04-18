@@ -5,6 +5,7 @@ import io
 import logging
 import random
 import urllib.parse
+from collections import defaultdict, deque
 
 import aiohttp
 import discord
@@ -23,7 +24,7 @@ from core.image_pipeline import (
     render_upscale_fallback,
     upscale_with_realesrgan,
 )
-from core.settings import REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
+from core.settings import IMAGE_FILTER_LEVEL, REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
 
 logger = logging.getLogger("discord")
 
@@ -201,6 +202,9 @@ class ImageCarousel(discord.ui.View):
 class ImageOps(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.image_filter_level = self._normalize_filter_level(IMAGE_FILTER_LEVEL)
+        self._query_shuffle_counts: dict[tuple[int, str], int] = {}
+        self._query_recent_fronts: dict[tuple[int, str], list[str]] = {}
         self.ctx_vault = app_commands.ContextMenu(name="💾 Save to Vault", callback=self.save_to_vault_context)
         self.ctx_ocr = app_commands.ContextMenu(name="🔤 Extract Text (OCR)", callback=self.extract_text_context)
         self.ctx_source = app_commands.ContextMenu(name="🔍 Find Anime Source", callback=self.find_source_context)
@@ -272,7 +276,7 @@ class ImageOps(commands.Cog):
         def _run_search() -> list[ImageCandidate]:
             results: list[ImageCandidate] = []
             with DDGS() as ddgs:
-                for row in ddgs.images(query, max_results=40):
+                for row in ddgs.images(query, max_results=60, safesearch=self._duckduckgo_safesearch()):
                     source_url = (row.get("image") or row.get("thumbnail") or "").strip()
                     preview_url = (row.get("thumbnail") or "").strip() or None
                     page_url = (row.get("url") or "").strip() or None
@@ -287,16 +291,25 @@ class ImageOps(commands.Cog):
             logger.warning("DuckDuckGo image search failed: %s", exc)
             return []
 
-    async def _search_with_bing(self, query: str) -> list[ImageCandidate]:
+    async def _search_with_bing(self, query: str, *, broaden: bool = False) -> list[ImageCandidate]:
         query_safe = urllib.parse.quote_plus(query)
-        offsets = (1, 36, 71, 106)
+        offsets = (1, 36, 71, 106, 141, 176) if broaden else (1, 36, 71, 106)
         headers = {"User-Agent": "Mozilla/5.0"}
         session = await HTTPSessionManager.get_session()
+        adult_filter = self._bing_adult_filter()
         urls = [
             "https://www.bing.com/images/search"
-            f"?q={query_safe}&qft=+filterui:imagesize-large&form=HDRSC2&first={offset}"
+            f"?q={query_safe}&qft=+filterui:imagesize-large&adlt={adult_filter}&form=HDRSC2&first={offset}"
             for offset in offsets
         ]
+        if broaden:
+            urls.extend(
+                [
+                    "https://www.bing.com/images/search"
+                    f"?q={query_safe}&adlt={adult_filter}&form=HDRSC2&first={offset}"
+                    for offset in (1, 36, 71, 106)
+                ]
+            )
 
         async def _fetch_page(url: str) -> str | None:
             try:
@@ -310,27 +323,111 @@ class ImageOps(commands.Cog):
         html_pages = [page for page in await asyncio.gather(*(_fetch_page(url) for url in urls)) if page]
 
         candidates: list[ImageCandidate] = []
+        limit = 36 if broaden else 24
         for page in html_pages:
-            candidates.extend(extract_bing_image_candidates(page, limit=24))
-        return dedupe_candidates(candidates, limit=32)
+            candidates.extend(extract_bing_image_candidates(page, limit=limit))
+        return dedupe_candidates(candidates, limit=64 if broaden else 32)
 
-    async def search_image_candidates(self, query: str) -> list[ImageCandidate]:
-        sources = await asyncio.gather(
-            self._search_with_duckduckgo(query),
-            self._search_with_bing(query),
-            return_exceptions=True,
-        )
+    def _normalize_query_key(self, query: str) -> str:
+        return " ".join((query or "").strip().lower().split())
 
-        candidates: list[ImageCandidate] = []
-        for source in sources:
-            if isinstance(source, Exception):
-                logger.warning("Image source aggregation failed for %r: %s", query, source)
+    @staticmethod
+    def _normalize_filter_level(level: str) -> str:
+        normalized = (level or "relaxed").strip().lower()
+        if normalized not in {"strict", "moderate", "relaxed"}:
+            return "relaxed"
+        return normalized
+
+    def _duckduckgo_safesearch(self) -> str:
+        return {"strict": "strict", "moderate": "moderate", "relaxed": "off"}[self.image_filter_level]
+
+    def _bing_adult_filter(self) -> str:
+        return {"strict": "strict", "moderate": "demote", "relaxed": "off"}[self.image_filter_level]
+
+    @staticmethod
+    def _candidate_domain(candidate: ImageCandidate) -> str:
+        for raw_url in (candidate.page_url, candidate.source_url, candidate.preview_url):
+            if not raw_url:
                 continue
-            candidates.extend(source)
+            parsed = urllib.parse.urlparse(raw_url)
+            host = (parsed.netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host:
+                return host
+        return "unknown"
 
-        candidates = dedupe_candidates(candidates, limit=48)
-        random.shuffle(candidates)
-        return candidates
+    def _apply_source_diversity(self, candidates: list[ImageCandidate], *, limit: int) -> list[ImageCandidate]:
+        grouped: dict[str, deque[ImageCandidate]] = defaultdict(deque)
+        domain_order: list[str] = []
+        for candidate in candidates:
+            domain = self._candidate_domain(candidate)
+            if domain not in grouped:
+                domain_order.append(domain)
+            grouped[domain].append(candidate)
+
+        diversified: list[ImageCandidate] = []
+        while domain_order and len(diversified) < limit:
+            next_domains: list[str] = []
+            for domain in domain_order:
+                bucket = grouped[domain]
+                if bucket and len(diversified) < limit:
+                    diversified.append(bucket.popleft())
+                if bucket:
+                    next_domains.append(domain)
+            domain_order = next_domains
+        return diversified
+
+    def _shuffle_candidates_for_request(
+        self,
+        requester_id: int,
+        query: str,
+        candidates: list[ImageCandidate],
+    ) -> list[ImageCandidate]:
+        normalized = self._normalize_query_key(query)
+        request_key = (requester_id, normalized)
+        request_count = self._query_shuffle_counts.get(request_key, 0) + 1
+        self._query_shuffle_counts[request_key] = request_count
+
+        shuffled = list(candidates)
+        random.Random(f"{requester_id}:{normalized}:{request_count}:{len(shuffled)}").shuffle(shuffled)
+
+        recent_fronts = self._query_recent_fronts.get(request_key, [])
+        if recent_fronts:
+            unseen_first = [candidate for candidate in shuffled if candidate.source_url not in recent_fronts]
+            seen_recently = [candidate for candidate in shuffled if candidate.source_url in recent_fronts]
+            if unseen_first:
+                shuffled = unseen_first + seen_recently
+
+        if shuffled:
+            new_fronts = [shuffled[0].source_url, *recent_fronts]
+            self._query_recent_fronts[request_key] = new_fronts[:8]
+
+        return shuffled
+
+    async def search_image_candidates(self, query: str, requester_id: int) -> list[ImageCandidate]:
+        async def _collect(*, broaden: bool = False) -> list[ImageCandidate]:
+            sources = await asyncio.gather(
+                self._search_with_duckduckgo(query),
+                self._search_with_bing(query, broaden=broaden),
+                return_exceptions=True,
+            )
+
+            merged: list[ImageCandidate] = []
+            for source in sources:
+                if isinstance(source, Exception):
+                    logger.warning("Image source aggregation failed for %r: %s", query, source)
+                    continue
+                merged.extend(source)
+            return merged
+
+        candidates = await _collect()
+        if len(dedupe_candidates(candidates, limit=48)) < 12:
+            candidates.extend(await _collect(broaden=True))
+
+        candidates = dedupe_candidates(candidates, limit=80)
+        candidates = self._apply_source_diversity(candidates, limit=48)
+        return self._shuffle_candidates_for_request(requester_id, query, candidates)
 
     def _pick_upscale_model(self, query: str, candidate: ImageCandidate) -> str:
         probe = " ".join(filter(None, [query, candidate.title, candidate.page_url or ""])).lower()
@@ -536,7 +633,7 @@ class ImageOps(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            candidates = await self.search_image_candidates(query)
+            candidates = await self.search_image_candidates(query, interaction.user.id)
             if not candidates:
                 await interaction.followup.send(f"❌ The Omni-Lens found zero matches for `{query}`.")
                 return

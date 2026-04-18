@@ -14,32 +14,24 @@ DEFAULT_CHAT_SYSTEM_INSTRUCTION = (
 
 class AriaCore:
     def __init__(self, ai_service=None, learning_engine=None):
-        self.parser=IntentParser()
-        self.diag=DiagnosticsEngine()
+        self.parser = IntentParser()
+        self.diag = DiagnosticsEngine()
         self.ai = ai_service or AIService()
         self.learning = learning_engine or LearningEngine()
 
     async def initialize(self):
         await self.learning.initialize()
 
-    async def handle(self,ctx,msg):
+    async def handle(self, ctx, msg):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         uid = actor.id if actor else 0
         normalized = (msg or "").strip().lower()
 
-        if normalized == "aria disable auto" and override_manager.can_override(uid):
+        if normalized in ("aria disable auto", "disable auto") and override_manager.can_override(uid):
             override_manager.toggle(False)
             return "Auto OFF"
 
-        if normalized == "disable auto" and override_manager.can_override(uid):
-            override_manager.toggle(False)
-            return "Auto OFF"
-
-        if normalized == "aria enable auto" and override_manager.can_override(uid):
-            override_manager.toggle(True)
-            return "Auto ON"
-
-        if normalized == "enable auto" and override_manager.can_override(uid):
+        if normalized in ("aria enable auto", "enable auto") and override_manager.can_override(uid):
             override_manager.toggle(True)
             return "Auto ON"
 
@@ -58,7 +50,14 @@ class AriaCore:
                 results.append(f"{r['error']} | Fix: {r['fix']}")
         return "\n".join(results) if results else None
 
-    async def observe_text(self, *, user_id: int | None, guild_id: int | None, text: str, source_kind: str = "message") -> list[str]:
+    async def observe_text(
+        self,
+        *,
+        user_id: int | None,
+        guild_id: int | None,
+        text: str,
+        source_kind: str = "message",
+    ) -> list[str]:
         return await self.learning.observe_text(user_id, guild_id, text, source_kind=source_kind)
 
     async def observe_message(self, message) -> None:
@@ -66,11 +65,13 @@ class AriaCore:
         if not content:
             return
         lowered = content.lower()
+        # FIX: also skip "a!" prefix (was already handled) but be explicit
         if lowered.startswith("a!") or lowered.startswith("aria "):
             return
+        guild_id = message.guild.id if message.guild else None
         await self.observe_text(
             user_id=message.author.id,
-            guild_id=message.guild.id if message.guild else None,
+            guild_id=guild_id,
             text=content,
             source_kind="message",
         )

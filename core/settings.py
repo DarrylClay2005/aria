@@ -64,3 +64,6 @@ DB_CONFIG = {
     "db": prefixed_env("DB_NAME", "discord_aria"),
     "autocommit": True,
 }
+
+
+IMAGE_FILTER_LEVEL = prefixed_env("IMAGE_FILTER_LEVEL", "relaxed").strip().lower() or "relaxed"

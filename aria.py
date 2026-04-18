@@ -94,8 +94,12 @@ async def on_ready():
     )
 
     # 🧠 Start autonomous system once
-    if bot.monitor_task is None or bot.monitor_task.done():
-        bot.monitor_task = asyncio.create_task(bot.monitor.start())
+    # FIX: cancel the old task before creating a new one to avoid ghost tasks
+    if bot.monitor_task is not None and not bot.monitor_task.done():
+        return  # Already running — do not spawn a second monitor
+    if bot.monitor_task is not None:
+        bot.monitor_task.cancel()
+    bot.monitor_task = asyncio.create_task(bot.monitor.start())
 
 
 def should_run_aria_core(message: discord.Message) -> bool:
@@ -115,8 +119,9 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    await bot.aria_core.observe_message(message)
+    # FIX: process_commands first so prefix commands are not also fed to aria_core
     await bot.process_commands(message)
+    await bot.aria_core.observe_message(message)
 
     if not should_run_aria_core(message):
         return
@@ -137,18 +142,21 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     original = getattr(error, "original", error)
     logger.exception("Slash command failed: %s", original)
 
-    message = "That command crashed before it finished. I've logged the error so it can actually be fixed."
+    msg = "That command crashed before it finished. I've logged the error so it can actually be fixed."
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(msg, ephemeral=True)
         else:
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
         pass
 
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    # FIX: don't log CommandNotFound — it's noisy and expected
+    if isinstance(error, commands.CommandNotFound):
+        return
     logger.exception("Prefix command failed: %s", error)
     try:
         await ctx.send("That command died mid-flight. Check the logs and fix the stack trace.")

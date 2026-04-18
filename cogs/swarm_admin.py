@@ -145,18 +145,39 @@ class SwarmAdmin(commands.Cog):
     async def execute(self, interaction: discord.Interaction, command: app_commands.Choice[str], drone: app_commands.Choice[str] = None, server_id: str = None):
         await interaction.response.defer(ephemeral=True)
         bots = [drone.value] if drone else DRONE_NAMES
+        target_guild_ids = []
+        if server_id:
+            try:
+                target_guild_ids = [int(server_id)]
+            except ValueError:
+                return await interaction.followup.send("❌ Error: server_id must be a valid numeric guild id.")
+        elif interaction.guild_id:
+            target_guild_ids = [int(interaction.guild_id)]
+
         try:
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
+                    writes = 0
                     for b in bots:
                         await cur.execute(f"CREATE TABLE IF NOT EXISTS discord_music_{b}.{b}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
-                        if server_id: await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (int(server_id), b, command.value))
-                        else:
+                        guild_ids = list(target_guild_ids)
+                        if not guild_ids:
                             try:
                                 await cur.execute(f"SELECT guild_id FROM discord_music_{b}.{b}_playback_state")
-                                for g in await cur.fetchall(): await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (g[0], b, command.value))
-                            except: pass
-            await interaction.followup.send(f"☢️ **ROUTER OVERRIDE:** Pushed **{command.value}** protocol to {len(bots)} isolated tables.")
+                                guild_ids = [int(row[0]) for row in await cur.fetchall() if row and row[0]]
+                            except Exception:
+                                guild_ids = []
+                        guild_ids = sorted(set(guild_ids))
+                        for gid in guild_ids:
+                            await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, b, command.value))
+                            writes += 1
+                    await conn.commit()
+            if target_guild_ids:
+                scope = f"guild `{target_guild_ids[0]}`" if len(target_guild_ids) == 1 else f"{len(target_guild_ids)} guilds"
+                return await interaction.followup.send(f"☢️ **ROUTER OVERRIDE:** Pushed **{command.value}** to {len(bots)} node(s) in {scope}.")
+            return await interaction.followup.send(
+                f"☢️ **ROUTER OVERRIDE:** Pushed **{command.value}** protocol to {writes} routed target(s)." if writes else "⚠️ No target guilds were found to receive that override."
+            )
         except Exception as e: await interaction.followup.send(f"❌ Error: {e}")
 
     @swarm_group.command(name="purge", description="Clear queued tracks and push a stop override to targeted nodes.")

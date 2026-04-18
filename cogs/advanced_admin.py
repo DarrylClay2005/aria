@@ -16,7 +16,7 @@ class AdvancedAdmin(commands.Cog):
     async def emergency_lockdown(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
         locked_count = 0
-        
+
         for channel in interaction.guild.text_channels:
             try:
                 await channel.set_permissions(interaction.guild.default_role, send_messages=False)
@@ -24,14 +24,17 @@ class AdvancedAdmin(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        await interaction.followup.send(f"🚨 **EMERGENCY LOCKDOWN INITIATED** 🚨\n\nI have paralyzed {locked_count} channels. The fucking peasants have been silenced. Ah, sweet serenity.")
+        await interaction.followup.send(
+            f"🚨 **EMERGENCY LOCKDOWN INITIATED** 🚨\n\n"
+            f"I have paralyzed {locked_count} channels. The fucking peasants have been silenced. Ah, sweet serenity."
+        )
 
     @app_commands.command(name="unlock_all", description="[OWNER] Restore sending permissions across locked text channels.")
     @app_commands.default_permissions(administrator=True)
     async def unlock_all(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=False)
         unlocked_count = 0
-        
+
         for channel in interaction.guild.text_channels:
             try:
                 await channel.set_permissions(interaction.guild.default_role, send_messages=None)
@@ -39,7 +42,9 @@ class AdvancedAdmin(commands.Cog):
             except discord.Forbidden:
                 pass
 
-        await interaction.followup.send(f"🔓 **LOCKDOWN LIFTED** 🔓\n\nI have unlocked {unlocked_count} channels. You may resume your dreadful noise.")
+        await interaction.followup.send(
+            f"🔓 **LOCKDOWN LIFTED** 🔓\n\nI have unlocked {unlocked_count} channels. You may resume your dreadful noise."
+        )
 
     # --- MASS MODERATION ---
     @app_commands.command(name="mass_ban", description="[OWNER] Ban multiple users at once by providing their IDs.")
@@ -51,46 +56,74 @@ class AdvancedAdmin(commands.Cog):
         failed = 0
 
         for uid in id_list:
+            # FIX: validate each ID is actually an integer before fetching
             try:
-                user = await self.bot.fetch_user(int(uid))
+                user_id = int(uid)
+            except ValueError:
+                failed += 1
+                continue
+            try:
+                user = await self.bot.fetch_user(user_id)
                 await interaction.guild.ban(user, reason=reason)
                 banned += 1
-            except Exception:
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                logger.warning("mass_ban: failed to ban %s — %s", uid, e)
                 failed += 1
 
-        await interaction.followup.send(f"Mass ban complete. 🔨 I successfully banished {banned} users. {failed} failed (probably invalid IDs or permissions).")
+        await interaction.followup.send(
+            f"Mass ban complete. 🔨 I successfully banished {banned} users. {failed} failed (probably invalid IDs or permissions)."
+        )
 
     # --- AUTOMATION & STATS ---
     @app_commands.command(name="schedule_message", description="[OWNER] Schedule a message to be sent to a channel later.")
     @app_commands.describe(delay_minutes="How many minutes to wait before sending")
     @app_commands.default_permissions(administrator=True)
     async def schedule_message(self, interaction: discord.Interaction, channel: discord.TextChannel, message: str, delay_minutes: int):
-        await interaction.response.send_message(f"Fucking fine. I'll send that to {channel.mention} in {delay_minutes} minutes. I am not your secretary, though.", ephemeral=True)
-        
-        # Run the timer in the background
-        self.bot.loop.create_task(self._send_delayed(channel, message, delay_minutes))
+        if delay_minutes < 1:
+            return await interaction.response.send_message("Minimum delay is 1 minute. I'm not an instant delivery service.", ephemeral=True)
 
-    async def _send_delayed(self, channel, message, delay_minutes):
+        await interaction.response.send_message(
+            f"Fucking fine. I'll send that to {channel.mention} in {delay_minutes} minutes. I am not your secretary, though.",
+            ephemeral=True,
+        )
+
+        # FIX: use asyncio.create_task instead of deprecated self.bot.loop.create_task
+        asyncio.create_task(self._send_delayed(channel, message, delay_minutes))
+
+    async def _send_delayed(self, channel: discord.TextChannel, message: str, delay_minutes: int):
         await asyncio.sleep(delay_minutes * 60)
-        await channel.send(message)
+        try:
+            await channel.send(message)
+        except discord.Forbidden:
+            logger.warning("schedule_message: no permission to send to channel %s (%s)", channel.name, channel.id)
+        except discord.HTTPException as e:
+            logger.exception("schedule_message: failed to deliver scheduled message — %s", e)
 
     @app_commands.command(name="server_stats", description="[OWNER] View high-level statistics for the current server.")
     @app_commands.default_permissions(administrator=True)
     async def server_stats(self, interaction: discord.Interaction):
         guild = interaction.guild
         member_count = guild.member_count
+        # FIX: guild.members may be empty if chunk_guilds_at_startup=False and members aren't cached.
+        # Use member_count for total and approximate bot count from cache only.
         bot_count = sum(1 for member in guild.members if member.bot)
         human_count = member_count - bot_count
+
         channel_count = len(guild.channels)
         role_count = len(guild.roles)
 
-        embed = discord.Embed(title=f"📊 Statistics for {guild.name}", description="Analyzing your pathetic little kingdom.", color=discord.Color.dark_purple())
+        embed = discord.Embed(
+            title=f"📊 Statistics for {guild.name}",
+            description="Analyzing your pathetic little kingdom.",
+            color=discord.Color.dark_purple(),
+        )
         embed.add_field(name="Humans", value=str(human_count), inline=True)
         embed.add_field(name="Bots", value=str(bot_count), inline=True)
         embed.add_field(name="Total Channels", value=str(channel_count), inline=True)
         embed.add_field(name="Total Roles", value=str(role_count), inline=True)
-        
+
         await interaction.response.send_message(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(AdvancedAdmin(bot))

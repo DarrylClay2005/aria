@@ -152,8 +152,11 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 for drone in DRONE_NAMES:
                     try:
+                        # FIX: only consider a drone "active" if it is actually playing,
+                        # not merely paused or stopped with a stale playback_state row.
                         await cur.execute(
-                            f"SELECT guild_id, is_playing FROM discord_music_{drone}.{drone}_playback_state WHERE guild_id = %s LIMIT 1",
+                            f"SELECT guild_id FROM discord_music_{drone}.{drone}_playback_state"
+                            f" WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
                             (guild_id,),
                         )
                         row = await cur.fetchone()
@@ -232,9 +235,18 @@ class SwarmController:
         if not guild_id:
             return "Swarm overrides only make sense inside a server."
 
-        targets = await self._guild_targets(guild_id, preferred=normalize_drone_name(drone), active_only=True)
+        # FIX: guard against uninitialized pool — same pattern as direct()
+        if not db.pool:
+            return "My swarm database link is offline right now."
+
+        # FIX: use active_only=False so commands like "pause gws" still route even
+        # when that bot is idle/paused (the music bot will no-op if it can't execute).
+        # This also prevents the broken active_only path from silently eating commands.
+        normalized_drone = normalize_drone_name(drone)
+        targets = await self._guild_targets(guild_id, preferred=normalized_drone, active_only=False)
+        # _guild_targets never returns [] when active_only=False, but guard anyway.
         if not targets:
-            targets = [normalize_drone_name(drone)] if normalize_drone_name(drone) else list(DRONE_NAMES)
+            targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
 
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -278,7 +290,11 @@ class SwarmController:
                 )
                 await cur.execute(
                     f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (bot_name, guild_id, vc_id or 0, channel_id_from_ctx(ctx), action, data or ""),
+                    # FIX: store NULL (not 0) for missing vc_id — the music bots check
+                    # truthiness of vc_id, so 0 is treated as "no channel" AND is a
+                    # valid-looking value that silently falls through to the home channel
+                    # fallback instead of routing correctly.
+                    (bot_name, guild_id, vc_id if vc_id else None, channel_id_from_ctx(ctx), action, data or ""),
                 )
 
         if action == "PLAY":
@@ -325,6 +341,10 @@ class SwarmController:
         if not guild_id:
             return "Broadcast only works inside a server."
 
+        # FIX: guard against uninitialized pool
+        if not db.pool:
+            return "My swarm database link is offline right now."
+
         payload = self.normalize_query(query)
         deployed = 0
 
@@ -356,6 +376,9 @@ class SwarmController:
         return f"Broadcast payload deployed to {deployed} swarm nodes."
 
     async def _lookup_home_channel(self, guild_id: int, drone: str) -> int | None:
+        # FIX: guard against uninitialized pool before attempting acquire
+        if not db.pool:
+            return None
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
@@ -401,7 +424,13 @@ class SwarmController:
             return "Loop mode must be one of: off, song, queue."
 
         guild_id = guild_id_from_ctx(ctx)
-        targets = [normalize_drone_name(drone)] if normalize_drone_name(drone) else list(DRONE_NAMES)
+        # FIX: normalize once so we never put None into the target list
+        normalized_drone = normalize_drone_name(drone)
+        targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
+
+        # FIX: guard against uninitialized pool
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -420,6 +449,10 @@ class SwarmController:
         if bot_name is None:
             active = await self.active_drones(guild_id)
             bot_name = active[0] if active else "gws"
+
+        # FIX: guard against uninitialized pool
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
@@ -441,10 +474,16 @@ class SwarmController:
             return "You do not have clearance to reshuffle swarm queues."
 
         guild_id = guild_id_from_ctx(ctx)
-        targets = [normalize_drone_name(drone)] if normalize_drone_name(drone) else list(DRONE_NAMES)
+        # FIX: normalize once to avoid [None] in target list when drone is invalid/absent
+        normalized_drone = normalize_drone_name(drone)
+        targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
         shuffled = []
 
         import random
+
+        # FIX: guard against uninitialized pool
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
@@ -509,7 +548,13 @@ class SwarmController:
             return "Filter must be one of: none, nightcore, vaporwave, bassboost, 8d."
 
         guild_id = guild_id_from_ctx(ctx)
-        targets = [normalize_drone_name(drone)] if normalize_drone_name(drone) else list(DRONE_NAMES)
+        # FIX: normalize once so we never put None into the target list
+        normalized_drone = normalize_drone_name(drone)
+        targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
+
+        # FIX: guard against uninitialized pool
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:

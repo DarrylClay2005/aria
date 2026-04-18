@@ -14,7 +14,7 @@ DB_CONFIG = {
     'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
 }
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k')
+GEMINI_API_KEY = os.getenv('ARIA_GEMINI_API_KEY', os.getenv('GEMINI_API_KEY', '')).strip()
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_ID = 'gemini-2.5-flash'
 
