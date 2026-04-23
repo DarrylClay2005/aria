@@ -631,67 +631,81 @@ class ImageOps(commands.Cog):
     @image_group.command(name="search", description="Search for images and browse the results in Aria's carousel.")
     async def search(self, interaction: discord.Interaction, query: str) -> None:
         await interaction.response.defer(thinking=True)
-
-        try:
-            candidates = await self.search_image_candidates(query, interaction.user.id)
-            if not candidates:
-                await interaction.followup.send(f"❌ The Omni-Lens found zero matches for `{query}`.")
+        last_exc = None
+        for attempt in range(2):
+            try:
+                candidates = await self.search_image_candidates(query, interaction.user.id)
+                if not candidates:
+                    await interaction.followup.send(f"❌ The Omni-Lens found zero matches for `{query}`.")
+                    return
+                view = ImageCarousel(self, interaction.user.id, query, candidates)
+                embed, file = await self._build_first_renderable_embed(view)
+                view.message = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
                 return
-
-            view = ImageCarousel(self, interaction.user.id, query, candidates)
-            embed, file = await self._build_first_renderable_embed(view)
-            view.message = await interaction.followup.send(embed=embed, file=file, view=view, wait=True)
-        except Exception as exc:
-            logger.exception("Image search failed: %s", exc)
-            await interaction.followup.send(f"❌ Network Fetch Error: {exc}")
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"Image search failed (attempt {attempt+1}): {exc}")
+                await asyncio.sleep(1)
+        logger.error(f"Image search failed after retries: {last_exc}")
+        await interaction.followup.send(f"❌ Network Fetch Error: {last_exc}")
 
     @image_group.command(name="vault", description="Retrieve an image previously saved in the Visual Vault.")
     async def vault_get(self, interaction: discord.Interaction, keyword: str) -> None:
         await interaction.response.defer()
-        try:
-            async with db.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS aria_visual_vault (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            keyword VARCHAR(100),
-                            image_url TEXT,
-                            added_by BIGINT,
-                            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        last_exc = None
+        for attempt in range(2):
+            try:
+                async with db.pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS aria_visual_vault (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                keyword VARCHAR(100),
+                                image_url TEXT,
+                                added_by BIGINT,
+                                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                            """
                         )
-                        """
-                    )
-                    await cur.execute(
-                        "SELECT image_url, added_by FROM aria_visual_vault WHERE keyword LIKE %s ORDER BY RAND() LIMIT 1",
-                        (f"%{keyword}%",),
-                    )
-                    result = await cur.fetchone()
-
-            if not result:
-                await interaction.followup.send(f"📭 The Visual Vault contains no records for `{keyword}`.")
+                        await cur.execute(
+                            "SELECT image_url, added_by FROM aria_visual_vault WHERE keyword LIKE %s ORDER BY RAND() LIMIT 1",
+                            (f"%{keyword}%",),
+                        )
+                        result = await cur.fetchone()
+                if not result:
+                    await interaction.followup.send(f"📭 The Visual Vault contains no records for `{keyword}`.")
+                    return
+                embed = discord.Embed(title=f"🔐 Vault Record: {keyword}", color=discord.Color.gold())
+                embed.set_image(url=result[0])
+                embed.set_footer(text=f"Archived by User ID: {result[1]}")
+                await interaction.followup.send(embed=embed)
                 return
-
-            embed = discord.Embed(title=f"🔐 Vault Record: {keyword}", color=discord.Color.gold())
-            embed.set_image(url=result[0])
-            embed.set_footer(text=f"Archived by User ID: {result[1]}")
-            await interaction.followup.send(embed=embed)
-        except Exception as exc:
-            logger.exception("Vault fetch failed: %s", exc)
-            await interaction.followup.send(f"❌ Vault Fetch Error: {exc}")
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"Vault fetch failed (attempt {attempt+1}): {exc}")
+                await asyncio.sleep(1)
+        logger.error(f"Vault fetch failed after retries: {last_exc}")
+        await interaction.followup.send(f"❌ Vault Fetch Error: {last_exc}")
 
     @image_group.command(name="forge", description="Generate a simple image with custom text burned onto it.")
     async def forge(self, interaction: discord.Interaction, text: str, color: str = "black") -> None:
         await interaction.response.defer()
-        try:
-            rendered = render_forge_image(text, background_color=color)
-            file = self.rendered_to_file(rendered, "forge_output")
-            embed = discord.Embed(title="⚒️ The Image Forge", color=discord.Color.dark_theme())
-            embed.set_image(url=f"attachment://{file.filename}")
-            await interaction.followup.send(embed=embed, file=file)
-        except Exception as exc:
-            logger.exception("Forge render failed: %s", exc)
-            await interaction.followup.send(f"❌ Forge Error: {exc}")
+        last_exc = None
+        for attempt in range(2):
+            try:
+                rendered = render_forge_image(text, background_color=color)
+                file = self.rendered_to_file(rendered, "forge_output")
+                embed = discord.Embed(title="⚒️ The Image Forge", color=discord.Color.dark_theme())
+                embed.set_image(url=f"attachment://{file.filename}")
+                await interaction.followup.send(embed=embed, file=file)
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"Forge render failed (attempt {attempt+1}): {exc}")
+                await asyncio.sleep(1)
+        logger.error(f"Forge render failed after retries: {last_exc}")
+        await interaction.followup.send(f"❌ Forge Error: {last_exc}")
 
 
 async def setup(bot):
