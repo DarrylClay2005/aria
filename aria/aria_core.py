@@ -39,13 +39,36 @@ class AriaCore:
         if not intents:
             return None
 
+        guild = getattr(ctx, "guild", None)
+        guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
+        raw_phrase = (msg or "").strip()
         results = []
         for intent in intents:
+            phrase_for_learning = raw_phrase
+            data = intent.get("data") or {}
+            if data.get("query"):
+                phrase_for_learning = f"{intent.get('action', 'unknown')} {str(data.get('query'))[:200]}"
+            elif data.get("drone"):
+                phrase_for_learning = f"{intent.get('action', 'unknown')} {data.get('drone')}"
             try:
                 response = await router.execute(intent["action"], ctx, intent)
+                await self.learning.record_command_pattern(
+                    action_name=intent.get("action", "unknown"),
+                    phrase=phrase_for_learning,
+                    user_id=uid,
+                    guild_id=guild_id,
+                    outcome="success" if response else "observed",
+                )
                 if response:
                     results.append(response)
             except Exception as e:
+                await self.learning.record_command_pattern(
+                    action_name=intent.get("action", "unknown"),
+                    phrase=phrase_for_learning,
+                    user_id=uid,
+                    guild_id=guild_id,
+                    outcome="failure",
+                )
                 r = self.diag.analyze_error(e)
                 results.append(f"{r['error']} | Fix: {r['fix']}")
         return "\n".join(results) if results else None
@@ -86,7 +109,7 @@ class AriaCore:
         user_name: str | None = None,
     ) -> str:
         await self.observe_text(user_id=user_id, guild_id=guild_id, text=prompt, source_kind="prompt")
-        prompt_fragment = await self.learning.build_prompt_fragment()
+        prompt_fragment = await self.learning.build_prompt_fragment(prompt=prompt, command_phrase=prompt)
         insult_seed = await self.learning.craft_insult_seed(user_name or "you", prompt)
         composite_instruction = "\n".join(
             part
@@ -102,4 +125,11 @@ class AriaCore:
             system_instruction=composite_instruction,
         )
         await self.observe_text(user_id=None, guild_id=guild_id, text=response, source_kind="reply")
+        await self.learning.record_conversation_pair(
+            user_id=user_id,
+            guild_id=guild_id,
+            prompt=prompt,
+            reply=response,
+            response_style="sarcastic_commander",
+        )
         return response

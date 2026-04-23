@@ -12,6 +12,8 @@ from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
 from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
+from core.webhooks import install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_ops_webhook_log, send_webhook_log
+from core.event_bus import EventBus
 
 # --- LOGGING SETUP ---
 file_handler = logging.FileHandler(filename="aria_core.log", encoding="utf-8", mode="a")
@@ -32,6 +34,7 @@ class AriaBot(commands.Bot):
         )
         self.aria_core = AriaCore()
         self.monitor = Monitor(self)
+        self.event_bus = EventBus(self)
         self.monitor_task = None
 
     async def setup_hook(self):
@@ -39,6 +42,7 @@ class AriaBot(commands.Bot):
         await db.connect()
         db.patch_legacy_create_pool()
         await self.aria_core.initialize()
+        await self.event_bus.initialize()
 
         if not COGS_DIR.exists():
             COGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,8 +61,11 @@ class AriaBot(commands.Bot):
                 failed_extensions.append(cog_file.name)
                 logger.exception("🔴 Failed to load module %s", cog_file.name)
 
-        await self.tree.sync()
-        logger.info("📡 Aria's global slash commands have been synced!")
+        try:
+            await self.tree.sync()
+            logger.info("📡 Aria's global slash commands have been synced!")
+        except Exception:
+            logger.exception("Slash command sync failed during setup_hook; continuing startup.")
         logger.info("🧩 Loaded %s/%s cog modules.", len(loaded_extensions), len(cog_files))
         if failed_extensions:
             logger.warning("⚠️ Extensions with load failures: %s", ", ".join(failed_extensions))
@@ -83,7 +90,14 @@ bot = AriaBot()
 # ================================
 @bot.event
 async def on_ready():
+    install_error_reporting()
+    install_loop_exception_handler()
     logger.info(f'🤖 Aria Intelligence Core is online and operating as {bot.user}')
+    await send_webhook_log(
+        "Aria Online",
+        f"Aria Intelligence Core is online and operating as {bot.user}.",
+        color=discord.Color.brand_green(),
+    )
 
     await bot.change_presence(
         activity=discord.Activity(
@@ -135,12 +149,14 @@ async def on_message(message):
 
     except Exception as e:
         logger.exception("[ARIA ERROR] %s", e)
+        await send_error_webhook_log("Aria Message Handler Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))
 
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     original = getattr(error, "original", error)
     logger.exception("Slash command failed: %s", original)
+    await send_error_webhook_log("Aria Slash Command Error", str(original), traceback_text="".join(__import__("traceback").format_exception(type(original), original, original.__traceback__)))
 
     msg = "That command crashed before it finished. I've logged the error so it can actually be fixed."
     try:
@@ -158,6 +174,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     if isinstance(error, commands.CommandNotFound):
         return
     logger.exception("Prefix command failed: %s", error)
+    await send_error_webhook_log("Aria Prefix Command Error", str(error), traceback_text="".join(__import__("traceback").format_exception(type(error), error, error.__traceback__)))
     try:
         await ctx.send("That command died mid-flight. Check the logs and fix the stack trace.")
     except discord.HTTPException:

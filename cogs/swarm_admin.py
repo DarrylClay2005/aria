@@ -4,22 +4,11 @@ from discord import app_commands
 import aiomysql
 import logging
 import random
-import aiohttp
-import os
 from core.database import db
 from core.swarm_control import ensure_guild_settings_schema
-
-class HTTPSessionManager:
-    _session = None
-    async def __aenter__(self):
-        if not HTTPSessionManager._session:
-            HTTPSessionManager._session = aiohttp.ClientSession()
-        return HTTPSessionManager._session
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
+from core.webhooks import send_webhook_log, send_error_webhook_log
 
 logger = logging.getLogger("discord")
-WEBHOOK_URL = os.getenv("ARIA_SWARM_WEBHOOK_URL")
 
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
 DRONES = [app_commands.Choice(name=d.capitalize(), value=d) for d in DRONE_NAMES]
@@ -43,11 +32,12 @@ class SwarmAdmin(commands.Cog):
                             dead_bots = await cur.fetchall()
                             for dbot in dead_bots:
                                 name = dbot['bot_name']
-                                if WEBHOOK_URL:
-                                    async with HTTPSessionManager() as session:
-                                        webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
-                                        embed = discord.Embed(title="⚠️ Medic Alert: Node Down", description=f"Node `{name}` missed its heartbeat. It may have crashed or hit a rate limit. Auto-Failover standing by.", color=discord.Color.red())
-                                        await webhook.send(embed=embed)
+                                await send_webhook_log(
+                                    "⚠️ Medic Alert: Node Down",
+                                    f"Node `{name}` missed its heartbeat. It may have crashed or hit a rate limit. Auto-Failover standing by.",
+                                    color=discord.Color.red(),
+                                    username="Aria Swarm Watch",
+                                )
                         except: pass
         except: pass
 

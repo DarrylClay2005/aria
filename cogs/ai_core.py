@@ -4,32 +4,15 @@ from discord import app_commands
 import aiomysql
 import logging
 import asyncio
-import aiohttp
 import re
-import os
 from aria.aria_core import AriaCore
 from core.ai_service import AIServiceUnavailable
 from core.database import db
+from core.webhooks import send_webhook_log, send_error_webhook_log
 
 logger = logging.getLogger("discord")
 
-WEBHOOK_URL = os.getenv('ARIA_WEBHOOK_URL')
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
-
-async def send_webhook_log(bot_name, title, description, color, retries=3):
-    if not WEBHOOK_URL:
-        return
-    for attempt in range(retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
-                embed = discord.Embed(title=title, description=description, color=color)
-                await webhook.send(embed=embed)
-                return
-        except Exception as e:
-            logger.warning("send_webhook_log attempt %s failed: %s", attempt + 1, e)
-            if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)
 
 class AICore(commands.Cog):
     def __init__(self, bot):
@@ -84,6 +67,7 @@ class AICore(commands.Cog):
             await message.reply(exc.public_message)
         except Exception as e:
             logger.exception("Aria Chat Error: %s", e)
+            await send_error_webhook_log("Aria Chat Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))
 
     @app_commands.command(name="aux", description="Have Aria pick a track, roast your taste, and route it to the swarm.")
     @app_commands.describe(prompt="Tell Aria what vibe, genre, or song idea you want her to take over with")
@@ -182,6 +166,7 @@ class AICore(commands.Cog):
             await interaction.followup.send(exc.public_message)
         except Exception as e:
             logger.exception("Aux Error: %s", e)
+            await send_error_webhook_log("Aria Aux Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))
             await interaction.followup.send(
                 "My central matrix glitched out trying to process your request. Figure it out yourselves."
             )
