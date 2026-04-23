@@ -13,6 +13,7 @@ class Monitor:
         self._last_full_scan = 0.0
 
     async def start(self):
+        from core.webhooks import send_ops_webhook_log
         await self.bus.initialize()
         while True:
             try:
@@ -23,6 +24,13 @@ class Monitor:
                     for event in await self.bus.claim_events(limit=50):
                         try:
                             await self.engine.handle_event(event)
+                            # --- Swarm Ops Feed: Send all processed events ---
+                            try:
+                                title = f"Swarm Event: {event.get('event_type','unknown')}"
+                                desc = f"Bot: {event.get('bot_name','n/a')} | Guild: {event.get('guild_id','n/a')}\nSource: {event.get('source_system','n/a')}\nSeverity: {event.get('severity','info')}\nPayload: {event.get('payload','{}')}"
+                                await send_ops_webhook_log(title, desc)
+                            except Exception as wh_exc:
+                                logger.warning(f"[Monitor] Failed to send ops webhook: {wh_exc}")
                         finally:
                             await self.bus.mark_processed(event["id"])
                     now = asyncio.get_running_loop().time()

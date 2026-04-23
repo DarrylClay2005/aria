@@ -437,21 +437,26 @@ class VideoOps(commands.Cog):
 
     async def queue_video_candidate(self, interaction: discord.Interaction, candidate: VideoCandidate) -> str:
         if not interaction.guild_id:
-            return "Video swarm handoff only works inside a server."
+            return "❌ Video swarm handoff only works inside a server."
         score = _provider_score(candidate)
         if score < 0.5:
-            return 'This site/result is searchable, but I am not confident it is supported for swarm playback handoff yet.'
+            return '⚠️ This site/result is searchable, but I am not confident it is supported for swarm playback handoff yet.'
         query = candidate.best_link() or candidate.page_url
         if not query:
-            return "That result does not have a usable link for playback handoff."
-        try:
-            status = await self.swarm.play(interaction, query)
-        except Exception:
-            logger.exception("Video playback handoff failed")
-            return "I could not hand that video result off to the swarm right now."
-        if score < 0.8:
-            return f'Playback handoff (low confidence): {status}'
-        return f'Playback handoff: {status}'
+            return "❌ That result does not have a usable link for playback handoff."
+        last_exc = None
+        for attempt in range(2):
+            try:
+                status = await self.swarm.play(interaction, query)
+                if score < 0.8:
+                    return f'⚠️ Playback handoff (low confidence): {status}'
+                return f'✅ Playback handoff: {status}'
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(f"Video playback handoff failed (attempt {attempt+1}): {exc}")
+                await asyncio.sleep(1)
+        logger.error(f"Video playback handoff failed after retries: {last_exc}")
+        return f"❌ I could not hand that video result off to the swarm right now. Error: {last_exc}"
 
     async def refresh_results(self, interaction: discord.Interaction, view: VideoResultView) -> None:
         self.session_memory[(interaction.guild_id or 0, interaction.user.id)] = {
@@ -506,11 +511,11 @@ class VideoOps(commands.Cog):
             )
         except Exception as exc:
             logger.exception("Video search failed: %s", exc)
-            await interaction.followup.send("I could not complete that public video search right now.", ephemeral=True)
+            await interaction.followup.send(f"❌ I could not complete that public video search right now. Error: {exc}", ephemeral=True)
             return
 
         if not results:
-            await interaction.followup.send("No public video results came back for that query with those filters.", ephemeral=True)
+            await interaction.followup.send("⚠️ No public video results came back for that query with those filters.", ephemeral=True)
             return
 
         view = VideoResultView(self, interaction.user.id, query, results, provider_filter=provider_filter, playable_only=playable_only, sort_by=sort_by)
