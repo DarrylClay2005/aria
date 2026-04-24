@@ -1,16 +1,11 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiomysql
+from core.db_helpers import db_cursor
 import logging
 from datetime import timedelta
 
 logger = logging.getLogger("discord")
-
-# --- CONFIGURATION ---
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
-}
 
 class ToxicProductivity(commands.Cog):
     def __init__(self, bot):
@@ -18,19 +13,15 @@ class ToxicProductivity(commands.Cog):
 
     # --- HELPER FUNCTIONS ---
     async def get_balance(self, user_id: int) -> int:
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
-                    await cur.execute("SELECT balance FROM aria_economy WHERE user_id = %s", (user_id,))
-                    res = await cur.fetchone()
-                    return res[0] if res else 0
+        async with db_cursor() as cur:
+            await cur.execute("INSERT IGNORE INTO aria_economy (user_id, balance) VALUES (%s, 0)", (user_id,))
+            await cur.execute("SELECT balance FROM aria_economy WHERE user_id = %s", (user_id,))
+            res = await cur.fetchone()
+            return res[0] if res else 0
 
     async def update_balance(self, user_id: int, amount: int):
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+        async with db_cursor() as cur:
+            await cur.execute("UPDATE aria_economy SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
 
     # --- THE TOXIC WORK COMMAND GROUP ---
     prod_group = app_commands.Group(name="toxic_work", description="Weaponized productivity tools for chaos and peer pressure.")
@@ -51,11 +42,9 @@ class ToxicProductivity(commands.Cog):
         await self.update_balance(interaction.user.id, -cost)
         
         # Inject the task into the target's database
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    # We assume aria_tasks exists because productivity.py created it!
-                    await cur.execute("INSERT INTO aria_tasks (user_id, task_name) VALUES (%s, %s)", (target.id, fake_task))
+        async with db_cursor() as cur:
+            # We assume aria_tasks exists because productivity.py created it!
+            await cur.execute("INSERT INTO aria_tasks (user_id, task_name) VALUES (%s, %s)", (target.id, fake_task))
                     
         await interaction.response.send_message(f"Teehee. I've charged you **{cost} coins** and silently added **\"{fake_task}\"** to {target.mention}'s task list. They're going to be so confused.")
 

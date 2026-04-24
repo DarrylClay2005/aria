@@ -458,8 +458,8 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 10",
-                        (guild_id,),
+                        f"SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC LIMIT 10",
+                        (guild_id, bot_name),
                     )
                     rows = await cur.fetchall()
                 except Exception:
@@ -490,8 +490,8 @@ class SwarmController:
                 for bot_name in targets:
                     try:
                         await cur.execute(
-                            f"SELECT * FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s",
-                            (guild_id,),
+                            f"SELECT * FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s",
+                            (guild_id, bot_name),
                         )
                         tracks = await cur.fetchall()
                     except Exception:
@@ -500,7 +500,7 @@ class SwarmController:
                         continue
 
                     random.shuffle(tracks)
-                    await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s", (guild_id,))
+                    await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s", (guild_id, bot_name))
                     for track in tracks:
                         await cur.execute(
                             f"INSERT INTO discord_music_{bot_name}.{bot_name}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",
@@ -521,12 +521,15 @@ class SwarmController:
         if not bot_name:
             return "I need a valid swarm node name for that removal."
 
+        if not db.pool:
+            return "My swarm database link is offline right now."
+
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT id, title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC",
-                        (guild_id,),
+                        f"SELECT id, title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC",
+                        (guild_id, bot_name),
                     )
                     rows = await cur.fetchall()
                 except Exception:
@@ -536,7 +539,7 @@ class SwarmController:
                     return f"`{bot_name}` only has {len(rows)} tracks queued."
 
                 target = rows[track_number - 1]
-                await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE id = %s", (target["id"],))
+                await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE id = %s AND guild_id = %s AND bot_name = %s", (target["id"], guild_id, bot_name))
         return f"Removed track {track_number} from `{bot_name}`: {target['title']}."
 
     async def set_filter(self, ctx, filter_type: str, *, drone: str | None = None) -> str:

@@ -33,6 +33,7 @@ class EventBus:
     def __init__(self, bot):
         self.bot = bot
         self._last_claimed_id = 0
+        self._claim_lock = asyncio.Lock()
 
     @staticmethod
     def _dict_cursor():
@@ -380,33 +381,37 @@ class EventBus:
     async def claim_events(self, *, limit: int = 50) -> list[dict[str, Any]]:
         if not db.pool:
             return []
-        async with db.pool.acquire() as conn:
-            async with conn.cursor(self._dict_cursor()) as cur:
-                await cur.execute(
-                    "SELECT id, event_type, source_system, bot_name, guild_id, severity, payload_json, created_at FROM aria_swarm_events WHERE processed = FALSE AND id > %s ORDER BY id ASC LIMIT %s",
-                    (self._last_claimed_id, limit),
-                )
-                rows = await cur.fetchall() or []
-                events: list[dict[str, Any]] = []
-                for row in rows:
-                    payload = {}
-                    try:
-                        payload = json.loads(row.get("payload_json") or "{}")
-                    except Exception:
+        async with self._claim_lock:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(self._dict_cursor()) as cur:
+                    await cur.execute(
+                        "SELECT id, event_type, source_system, bot_name, guild_id, severity, payload_json, created_at "
+                        "FROM aria_swarm_events WHERE processed = FALSE AND id > %s ORDER BY id ASC LIMIT %s",
+                        (self._last_claimed_id, limit),
+                    )
+                    rows = await cur.fetchall() or []
+                    events: list[dict[str, Any]] = []
+                    max_claimed = self._last_claimed_id
+                    for row in rows:
                         payload = {}
-                    event = {
-                        "id": int(row.get("id") or 0),
-                        "event_type": row.get("event_type"),
-                        "source_system": row.get("source_system"),
-                        "bot_name": row.get("bot_name"),
-                        "guild_id": row.get("guild_id"),
-                        "severity": row.get("severity"),
-                        "payload": payload,
-                        "created_at": str(row.get("created_at")),
-                    }
-                    events.append(event)
-                    self._last_claimed_id = max(self._last_claimed_id, event["id"])
-                return events
+                        try:
+                            payload = json.loads(row.get("payload_json") or "{}")
+                        except Exception:
+                            payload = {}
+                        event = {
+                            "id": int(row.get("id") or 0),
+                            "event_type": row.get("event_type"),
+                            "source_system": row.get("source_system"),
+                            "bot_name": row.get("bot_name"),
+                            "guild_id": row.get("guild_id"),
+                            "severity": row.get("severity"),
+                            "payload": payload,
+                            "created_at": str(row.get("created_at")),
+                        }
+                        events.append(event)
+                        max_claimed = max(max_claimed, event["id"])
+                    self._last_claimed_id = max_claimed
+                    return events
 
     async def mark_processed(self, event_id: int) -> None:
         if not db.pool:

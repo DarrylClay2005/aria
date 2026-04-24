@@ -130,7 +130,8 @@ class SwarmAdmin(commands.Cog):
     @app_commands.choices(drone=DRONES)
     @app_commands.choices(command=[
         app_commands.Choice(name="Pause", value="PAUSE"), app_commands.Choice(name="Resume", value="RESUME"),
-        app_commands.Choice(name="Skip", value="SKIP"), app_commands.Choice(name="Killswitch (Stop & Clear)", value="STOP")
+        app_commands.Choice(name="Skip", value="SKIP"), app_commands.Choice(name="Killswitch (Stop & Clear)", value="STOP"),
+        app_commands.Choice(name="Restart Node", value="RESTART")
     ])
     async def execute(self, interaction: discord.Interaction, command: app_commands.Choice[str], drone: app_commands.Choice[str] = None, server_id: str = None):
         await interaction.response.defer(ephemeral=True)
@@ -157,6 +158,8 @@ class SwarmAdmin(commands.Cog):
                                 guild_ids = [int(row[0]) for row in await cur.fetchall() if row and row[0]]
                             except Exception:
                                 guild_ids = []
+                        if command.value == "RESTART" and not guild_ids:
+                            guild_ids = [0]
                         guild_ids = sorted(set(guild_ids))
                         for gid in guild_ids:
                             await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, b, command.value))
@@ -194,7 +197,11 @@ class SwarmAdmin(commands.Cog):
                                 target_guild_ids.append(interaction.guild_id)
                             for gid in target_guild_ids:
                                 await cur.execute(f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, b, "STOP"))
-                            await cur.execute(f"DELETE FROM discord_music_{b}.{b}_queue WHERE guild_id = %s", (interaction.guild_id,))
+                            await cur.execute(f"DELETE FROM discord_music_{b}.{b}_queue WHERE guild_id = %s AND bot_name = %s", (interaction.guild_id, b))
+                            try:
+                                await cur.execute(f"DELETE FROM discord_music_{b}.{b}_queue_backup WHERE guild_id = %s AND bot_name = %s", (interaction.guild_id, b))
+                            except Exception:
+                                pass
                         except:
                             pass
             success_msg = f"☢️ **Purge complete across {len(bots)} isolated tables:** queues wiped and active playback stop overrides pushed."
@@ -211,9 +218,17 @@ class SwarmAdmin(commands.Cog):
                 if interaction.channel:
                     await interaction.channel.send(err_msg)
 
-    @swarm_group.command(name="direct", description="Send a direct play or leave order to a specific bot.")
+    @swarm_group.command(name="direct", description="Send a direct play, pause, resume, skip, stop, recover, or leave order to a specific bot.")
     @app_commands.choices(drone=DRONES)
-    @app_commands.choices(action=[app_commands.Choice(name="Summon & Play", value="PLAY"), app_commands.Choice(name="Force Leave", value="LEAVE")])
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Summon & Play", value="PLAY"),
+        app_commands.Choice(name="Pause", value="PAUSE"),
+        app_commands.Choice(name="Resume", value="RESUME"),
+        app_commands.Choice(name="Skip", value="SKIP"),
+        app_commands.Choice(name="Stop", value="STOP"),
+        app_commands.Choice(name="Recover", value="RECOVER"),
+        app_commands.Choice(name="Force Leave", value="LEAVE"),
+    ])
     async def direct(self, interaction: discord.Interaction, drone: app_commands.Choice[str], action: app_commands.Choice[str], data: str = None):
         await interaction.response.defer(ephemeral=True)
         if action.value == "PLAY" and not data: return await interaction.followup.send("❌ Provide a URL.")
@@ -222,6 +237,14 @@ class SwarmAdmin(commands.Cog):
             b = drone.value
             async with db.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
+                    if action.value in {"PAUSE", "RESUME", "SKIP", "STOP", "RESTART"}:
+                        await cur.execute(f"CREATE TABLE IF NOT EXISTS discord_music_{b}.{b}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
+                        await cur.execute(
+                            f"REPLACE INTO discord_music_{b}.{b}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                            (interaction.guild_id or 0, b, action.value),
+                        )
+                        await conn.commit()
+                        return await interaction.followup.send(f"📡 Routed `{action.value}` override into `{drone.name}`.")
                     if not target_vc_id:
                         try:
                             await cur.execute(f"SELECT home_vc_id FROM discord_music_{b}.{b}_bot_home_channels WHERE guild_id = %s", (interaction.guild_id,))
@@ -331,7 +354,7 @@ class SwarmAdmin(commands.Cog):
                             continue
 
                         random.shuffle(tracks)
-                        await cur.execute(f"DELETE FROM discord_music_{b}.{b}_queue WHERE guild_id = %s", (interaction.guild_id,))
+                        await cur.execute(f"DELETE FROM discord_music_{b}.{b}_queue WHERE guild_id = %s AND bot_name = %s", (interaction.guild_id, b))
                         for t in tracks:
                             await cur.execute(
                                 f"INSERT INTO discord_music_{b}.{b}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",

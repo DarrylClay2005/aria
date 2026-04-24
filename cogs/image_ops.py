@@ -61,6 +61,11 @@ class VaultTagModal(discord.ui.Modal, title="Encrypt Image to Vault"):
         self.image_url = image_url
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not db.pool:
+            await interaction.response.send_message(
+                "❌ Database is unavailable right now.", ephemeral=True
+            )
+            return
         try:
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
@@ -652,6 +657,9 @@ class ImageOps(commands.Cog):
     @image_group.command(name="vault", description="Retrieve an image previously saved in the Visual Vault.")
     async def vault_get(self, interaction: discord.Interaction, keyword: str) -> None:
         await interaction.response.defer()
+        if not db.pool:
+            await interaction.followup.send("❌ Database is unavailable right now.", ephemeral=True)
+            return
         last_exc = None
         for attempt in range(2):
             try:

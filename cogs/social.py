@@ -9,6 +9,16 @@ from core.database import db
 
 logger = logging.getLogger("discord")
 
+def _row_get(row, key, index=0, default=None):
+    if not row:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[index]
+    except (IndexError, TypeError, KeyError):
+        return default
+
 class Social(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -57,21 +67,21 @@ class Social(commands.Cog):
             async with conn.cursor() as cur:
                 await cur.execute("SELECT score FROM aria_affinity WHERE user_id = %s", (target.id,))
                 aff = (await cur.fetchone())
-                affinity = aff[0] if aff else 0
+                affinity = _row_get(aff, "score", 0, 0)
                 
                 await cur.execute("INSERT IGNORE INTO aria_sanity (user_id) VALUES (%s)", (target.id,))
                 await cur.execute("SELECT sanity_level FROM aria_sanity WHERE user_id = %s", (target.id,))
                 san = (await cur.fetchone())
-                sanity = san[0] if san else 100
+                sanity = _row_get(san, "sanity_level", 0, 100)
                 
                 try:
                     await cur.execute("SELECT COUNT(*) FROM aria_tasks WHERE user_id = %s AND status != 'completed'", (target.id,))
                     tasks_row = (await cur.fetchone())
-                    pending_tasks = tasks_row[0] if tasks_row else 0
+                    pending_tasks = _row_get(tasks_row, "COUNT(*)", 0, 0)
                     
                     await cur.execute("SELECT genre, play_count FROM discord_music_gws.gws_user_music_tastes WHERE user_id = %s ORDER BY play_count DESC LIMIT 3", (target.id,))
                     music_rows = await cur.fetchall()
-                    music_tastes = ", ".join([f"{row[0]} ({row[1]} plays)" for row in music_rows]) if music_rows else "No tracked music taste. Probably listens to silence."
+                    music_tastes = ", ".join([f"{_row_get(row, 'genre', 0, 'Unknown')} ({_row_get(row, 'play_count', 1, 0)} plays)" for row in music_rows]) if music_rows else "No tracked music taste. Probably listens to silence."
                 except: 
                     pending_tasks = 0
                     music_tastes = "Unknown"

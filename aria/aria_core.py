@@ -24,7 +24,8 @@ class AriaCore:
 
     async def handle(self, ctx, msg):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
-        uid = actor.id if actor else 0
+        uid = int(getattr(actor, "id", 0) or 0)
+        learning_uid = uid if uid > 0 else None
         normalized = (msg or "").strip().lower()
 
         if normalized in ("aria disable auto", "disable auto") and override_manager.can_override(uid):
@@ -55,7 +56,7 @@ class AriaCore:
                 await self.learning.record_command_pattern(
                     action_name=intent.get("action", "unknown"),
                     phrase=phrase_for_learning,
-                    user_id=uid,
+                    user_id=learning_uid,
                     guild_id=guild_id,
                     outcome="success" if response else "observed",
                 )
@@ -65,7 +66,7 @@ class AriaCore:
                 await self.learning.record_command_pattern(
                     action_name=intent.get("action", "unknown"),
                     phrase=phrase_for_learning,
-                    user_id=uid,
+                    user_id=learning_uid,
                     guild_id=guild_id,
                     outcome="failure",
                 )

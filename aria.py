@@ -33,8 +33,8 @@ class AriaBot(commands.Bot):
             intents=discord.Intents.all()
         )
         self.aria_core = AriaCore()
-        self.monitor = Monitor(self)
         self.event_bus = EventBus(self)
+        self.monitor = Monitor(self, self.event_bus)
         self.monitor_task = None
 
     async def setup_hook(self):
@@ -107,13 +107,22 @@ async def on_ready():
         status=discord.Status.dnd
     )
 
-    # 🧠 Start autonomous system once
-    # FIX: cancel the old task before creating a new one to avoid ghost tasks
-    if bot.monitor_task is not None and not bot.monitor_task.done():
-        return  # Already running — do not spawn a second monitor
-    if bot.monitor_task is not None:
-        bot.monitor_task.cancel()
-    bot.monitor_task = asyncio.create_task(bot.monitor.start())
+    # 🧠 Start/recreate autonomous monitor.
+    # Discord may fire on_ready again after a reconnect; keep a live task, but
+    # recreate it if the old one was cancelled/finished during the disconnect.
+    task = bot.monitor_task
+    if task is not None and not task.done():
+        logger.info("Aria monitor task is already running; not spawning a duplicate.")
+    else:
+        if task is not None and task.cancelled():
+            logger.warning("Aria monitor task was cancelled; recreating it after reconnect.")
+        elif task is not None:
+            exc = task.exception() if not task.cancelled() else None
+            if exc:
+                logger.warning("Aria monitor task exited with error; recreating it: %r", exc)
+            else:
+                logger.info("Aria monitor task finished; recreating it after reconnect.")
+        bot.monitor_task = asyncio.create_task(bot.monitor.start(), name="aria-monitor")
 
 
 def should_run_aria_core(message: discord.Message) -> bool:

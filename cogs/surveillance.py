@@ -4,15 +4,11 @@ from discord.ext import commands
 from discord import app_commands
 from google import genai
 from google.genai import types
-import aiomysql
 import logging
 import os
+from core.db_helpers import db_cursor
 
 logger = logging.getLogger("discord")
-
-DB_CONFIG = {
-    'host': '127.0.0.1', 'user': 'botuser', 'password': 'swarmpanel', 'db': 'discord_aria', 'autocommit': True
-}
 
 GEMINI_API_KEY = os.getenv('ARIA_GEMINI_API_KEY', os.getenv('GEMINI_API_KEY', '')).strip()
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -84,11 +80,9 @@ class Surveillance(commands.Cog):
     @surveillance_group.command(name="wall_of_shame", description="Show the members with the worst backlog of unfinished tasks.")
     async def wall_of_shame(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with aiomysql.create_pool(**DB_CONFIG) as pool:
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT user_id, COUNT(*) as pending_count FROM aria_tasks WHERE status != 'completed' GROUP BY user_id ORDER BY pending_count DESC LIMIT 5")
-                    worst_users = await cur.fetchall()
+        async with db_cursor() as cur:
+            await cur.execute("SELECT user_id, COUNT(*) as pending_count FROM aria_tasks WHERE status != 'completed' GROUP BY user_id ORDER BY pending_count DESC LIMIT 5")
+            worst_users = await cur.fetchall()
 
         if not worst_users:
             return await interaction.followup.send("Miraculously, there are no pending tasks right now.")

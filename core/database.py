@@ -40,7 +40,7 @@ class DatabaseManager:
                 logger.error("aiomysql is not installed; database features are unavailable in this environment.")
                 return
             try:
-                pool_config = {**DB_CONFIG, "minsize": 1, "maxsize": 15}
+                pool_config = {**DB_CONFIG, "minsize": 1, "maxsize": 15, "autocommit": True}
                 self.pool = await _ORIGINAL_CREATE_POOL(**pool_config)
                 logger.info("🟢 Global Database Pool initialized.")
             except Exception as e:
