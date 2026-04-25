@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from core.autonomy import AutonomousEngine
+from core.event_bus import EventBus
 from core.override import override_manager
 
 logger = logging.getLogger("discord")
@@ -10,12 +11,11 @@ class Monitor:
         self.engine = AutonomousEngine(bot)
         self.bus = bus or getattr(bot, "event_bus", None)
         if self.bus is None:
-                        self.bus = EventBus(bot)
+            self.bus = EventBus(bot)
         self._last_full_scan = 0.0
 
     async def start(self):
         from core.webhooks import send_ops_webhook_log
-        await self.bus.initialize()
         while True:
             try:
                 await self.bus.sync_swarm_sources()

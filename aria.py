@@ -117,7 +117,10 @@ async def on_ready():
         if task is not None and task.cancelled():
             logger.warning("Aria monitor task was cancelled; recreating it after reconnect.")
         elif task is not None:
-            exc = task.exception() if not task.cancelled() else None
+            try:
+                exc = task.exception() if not task.cancelled() else None
+            except asyncio.CancelledError:
+                exc = None
             if exc:
                 logger.warning("Aria monitor task exited with error; recreating it: %r", exc)
             else:

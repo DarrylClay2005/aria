@@ -58,10 +58,11 @@ TOKEN = prefixed_env("DISCORD_TOKEN", "").strip()
 OVERRIDE_USER_ID = prefixed_env("OVERRIDE_USER_ID", _DEFAULT_OVERRIDE_USER_ID).strip()
 GEMINI_MODEL_ID = prefixed_env("GEMINI_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
 DB_CONFIG = {
-    "host": prefixed_env("DB_HOST", "127.0.0.1"),
-    "user": prefixed_env("DB_USER", "botuser"),
-    "password": prefixed_env("DB_PASSWORD", ""),
-    "db": prefixed_env("DB_NAME", "discord_aria"),
+    "host": prefixed_env("DB_HOST") or os.getenv("DB_HOST") or os.getenv("MYSQL_HOST") or "host.docker.internal",
+    "port": int(prefixed_env("DB_PORT") or os.getenv("DB_PORT") or os.getenv("MYSQL_PORT") or "3306"),
+    "user": prefixed_env("DB_USER") or os.getenv("DB_USER") or os.getenv("MYSQL_USER") or "botuser",
+    "password": prefixed_env("DB_PASSWORD") or os.getenv("DB_PASSWORD") or os.getenv("MYSQL_PASSWORD") or "",
+    "db": prefixed_env("DB_NAME") or os.getenv("ARIA_DB_NAME") or "discord_aria",
     "autocommit": True,
 }
 

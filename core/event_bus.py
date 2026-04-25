@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+import asyncio
 from typing import Any
 
 try:
@@ -274,13 +275,14 @@ class EventBus:
                 """,
                 (drone, guild_id, signature, json.dumps(state, default=str), score, label),
             )
-            await cur.execute(
-                """
-                INSERT INTO aria_swarm_health_history (bot_name, guild_id, health_score, status_label, state_signature)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (drone, guild_id, score, label, signature),
-            )
+            if signature != previous_signature:
+                await cur.execute(
+                    """
+                    INSERT INTO aria_swarm_health_history (bot_name, guild_id, health_score, status_label, state_signature)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (drone, guild_id, score, label, signature),
+                )
             await cur.execute(
                 """
                 SELECT health_score FROM aria_swarm_health_history
@@ -343,7 +345,7 @@ class EventBus:
         last_id = int(await self._get_cursor(cur, cursor_key, default="0"))
         try:
             await cur.execute(
-                f"SELECT id, guild_id, error_type, error_message, created_at FROM {cfg['schema']}.{cfg['errors']} WHERE id > %s ORDER BY id ASC LIMIT 100",
+                f"SELECT id, guild_id, error_type, description, created_at FROM {cfg['schema']}.{cfg['errors']} WHERE id > %s ORDER BY id ASC LIMIT 100",
                 (last_id,),
             )
             rows = await cur.fetchall() or []
@@ -361,7 +363,7 @@ class EventBus:
                 severity="error",
                 payload={
                     "error_type": row.get("error_type"),
-                    "error_message": row.get("error_message"),
+                    "error_message": row.get("description"),
                     "created_at": str(row.get("created_at")),
                 },
                 dedupe_key=f"boterror:{drone}:{event_id}",

@@ -806,6 +806,11 @@ class AutonomousEngine:
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN track_data LONGTEXT NULL",
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN requested_by BIGINT NULL",
             f"ALTER TABLE {schema}.{cfg['home']} ADD COLUMN bot_name VARCHAR(50) NULL",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN last_error TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
+            f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN last_error TEXT NULL",
         ]:
             try:
                 await cur.execute(stmt)
@@ -1071,9 +1076,18 @@ class AutonomousEngine:
 
     async def _enqueue_direct_order(self, cur, drone: str, guild_id: int, command: str, *, vc_id: int | None = None, text_channel_id: int | None = None, data: str | None = None):
         cfg = BOT_SCHEMAS[drone]
+        await self.ensure_bot_schema(cur, drone)
+        # De-dupe by command so Aria does not flood a music bot with repeated recovery orders.
+        try:
+            await cur.execute(
+                f"DELETE FROM {cfg['schema']}.{cfg['direct']} WHERE bot_name=%s AND guild_id=%s AND command=%s",
+                (drone, guild_id, command),
+            )
+        except Exception:
+            pass
         await cur.execute(
             f"INSERT INTO {cfg['schema']}.{cfg['direct']} (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-            (drone, guild_id, vc_id, text_channel_id, command, data),
+            (drone, guild_id, vc_id if vc_id else None, text_channel_id if text_channel_id else None, command, data or "aria"),
         )
 
     async def _repair_recover_from_queue(self, cur, issue: dict[str, Any]) -> RepairResult:
@@ -1085,16 +1099,12 @@ class AutonomousEngine:
         text_channel_id = (playback or {}).get("text_channel_id")
         if not vc_id:
             return RepairResult(False, "recover", drone, "no home or playback channel available")
-        await self._enqueue_direct_order(cur, drone, guild_id, "RECOVER", vc_id=vc_id, text_channel_id=text_channel_id)
+        await self._enqueue_direct_order(cur, drone, guild_id, "RECOVER", vc_id=vc_id, text_channel_id=text_channel_id, data="aria_auto_recovery")
         await cur.execute(
-            f"REPLACE INTO {cfg['schema']}.{cfg['override']} (guild_id, bot_name, command) VALUES (%s, %s, %s)",
-            (guild_id, drone, "RESUME"),
-        )
-        await cur.execute(
-            f"UPDATE {cfg['schema']}.{cfg['playback']} SET is_playing = FALSE WHERE guild_id=%s",
+            f"UPDATE {cfg['schema']}.{cfg['playback']} SET is_playing = FALSE, is_paused = FALSE WHERE guild_id=%s",
             (guild_id,),
         )
-        return RepairResult(True, "recover_resume", drone, details=f"queued RECOVER+RESUME for guild {guild_id}")
+        return RepairResult(True, "recover", drone, details=f"queued RECOVER for guild {guild_id}")
 
     async def _repair_invalid_state(self, cur, drone: str, guild_id: int) -> RepairResult:
         cfg = BOT_SCHEMAS[drone]
@@ -1177,10 +1187,8 @@ class AutonomousEngine:
                 result = RepairResult(True, "delete_missing_automation", "aria")
                 await self._journal_repair(issue, result)
                 return True
-            elif issue["type"] in {"stale_swarm_node", "queue_rebuild_needed", "recover_from_queue", "invalid_playback_state", "invalid_position", "stale_orders", "stalled_playback_candidate", "predictive_queue_drift", "predictive_stall_risk", "missing_recovery_anchor", "drone_outlier"}:
+            elif issue["type"] in {"stale_swarm_node", "queue_rebuild_needed", "recover_from_queue", "invalid_playback_state", "invalid_position", "stale_orders", "stalled_playback_candidate", "predictive_queue_drift", "predictive_stall_risk", "missing_recovery_anchor", "drone_outlier", "drone_health_outlier", "guild_hotspot"}:
                 drone = issue.get("drone")
-                if drone not in BOT_SCHEMAS:
-                    return False
                 action_map = {
                     "queue_rebuild_needed": "queue_rebuild",
                     "recover_from_queue": "recover_resume",
@@ -1214,6 +1222,13 @@ class AutonomousEngine:
                 strategy_plan = await self._choose_action_plan(issue)
                 strategy_index = int(issue.get('_strategy_index', 0) or 0)
                 current_strategy = strategy_plan[min(strategy_index, max(len(strategy_plan) - 1, 0))] if strategy_plan else action
+                if issue["type"] == "guild_hotspot":
+                    await send_ops_webhook_log("Aria Medic Guild Hotspot", f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.", fields=[("Bad Bots", str(issue.get('bad_bot_count', 0)), True), ("Bot Count", str(issue.get('bot_count', 0)), True), ("Issue", symptom, False)])
+                    result = RepairResult(True, "hotspot_report", "swarm", details="reported guild hotspot requiring operator attention")
+                    await self._journal_repair(issue, result)
+                    return True
+                if drone not in BOT_SCHEMAS:
+                    return False
                 async with db.pool.acquire() as conn:
                     async with conn.cursor(self._dict_cursor()) as cur:
                         await self.ensure_bot_schema(cur, drone)
@@ -1238,7 +1253,6 @@ class AutonomousEngine:
                             if not verified:
                                 result = RepairResult(False, f"{result.action}_pending", drone, details=(result.details + f" | waiting for verification via follow-up strategy={current_strategy}").strip())
                 await self._journal_repair(issue, result)
-                await self._record_operator_decision(issue)
                 if issue["type"] not in {"stale_swarm_node", "drone_outlier", "drone_health_outlier", "guild_hotspot", "missing_recovery_anchor"}:
                     if result.success:
                         await send_webhook_log(

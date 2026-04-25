@@ -392,6 +392,8 @@ class SwarmController:
         return row.get("home_vc_id") if row else None
 
     async def set_home(self, ctx, drone: str, channel_id: int) -> str:
+        if not db.pool:
+            return "Database pool is not ready yet; swarm home channels cannot be updated."
         if not is_admin_or_override(ctx):
             return "You do not have clearance to rewrite swarm home channels."
 
@@ -579,6 +581,8 @@ class SwarmController:
         return f"Filter `{normalized}` applied to {target_label}."
 
     async def radar(self, ctx) -> str:
+        if not db.pool:
+            return "Database pool is not ready yet; swarm radar is temporarily offline."
         guild_id = guild_id_from_ctx(ctx)
         guild = guild_from_ctx(ctx)
         lines = []
@@ -622,6 +626,8 @@ class SwarmController:
         return "\n".join(lines) if lines else "Grid is quiet. No active swarm nodes reported for this server."
 
     async def wrapped(self, ctx) -> str:
+        if not db.pool:
+            return "Database pool is not ready yet; swarm wrapped stats are temporarily offline."
         guild_id = guild_id_from_ctx(ctx)
         counts = {}
 
