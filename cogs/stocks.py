@@ -17,6 +17,9 @@ class Stocks(commands.Cog):
 
     # --- DATABASE INIT & SEEDING ---
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("stocks: database pool unavailable; table init skipped.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""

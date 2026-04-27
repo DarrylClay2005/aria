@@ -12,7 +12,7 @@ from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
 from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
-from core.webhooks import install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_ops_webhook_log, send_webhook_log
+from core.webhooks import install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
 
 # --- LOGGING SETUP ---

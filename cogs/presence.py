@@ -1,4 +1,3 @@
-import asyncio
 import discord
 from discord.ext import commands, tasks
 import logging
@@ -58,7 +57,7 @@ class PresenceProfiler(commands.Cog):
                                         
                                         try:
                                             await member.timeout(timedelta(hours=1), reason="Aria's Touch Grass Protocol")
-                                            await shame_channel.send(f"*(I have timed them out for 1 hour so they are forced to go outside.)*")
+                                            await shame_channel.send("*(I have timed them out for 1 hour so they are forced to go outside.)*")
                                         except discord.Forbidden:
                                             pass
                                     except AIServiceUnavailable as exc:

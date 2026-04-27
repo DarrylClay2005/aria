@@ -3,12 +3,11 @@ from discord.ext import commands
 from discord import app_commands
 import aiomysql
 import logging
-import asyncio
 import re
 from aria.aria_core import AriaCore
 from core.ai_service import AIServiceUnavailable
 from core.database import db
-from core.webhooks import send_webhook_log, send_error_webhook_log
+from core.webhooks import send_error_webhook_log
 
 logger = logging.getLogger("discord")
 

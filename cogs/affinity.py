@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.database import db
 from core.db_helpers import db_cursor
 
 logger = logging.getLogger("discord")
@@ -14,6 +15,9 @@ class Affinity(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("affinity: database pool unavailable; table init skipped.")
+            return
         async with db_cursor() as cur:
             await cur.execute(
                 """

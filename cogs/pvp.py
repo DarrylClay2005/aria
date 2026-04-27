@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.database import db
 from core.db_helpers import db_cursor
 from core.interaction_utils import require_guild
 
@@ -17,6 +18,9 @@ class PvP(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("pvp: database pool unavailable; table init skipped.")
+            return
         async with db_cursor() as cur:
             await cur.execute(
                 """

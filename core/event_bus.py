@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import time
 import asyncio
 from typing import Any
 
@@ -142,6 +141,9 @@ class EventBus:
     async def _playback_sync_query(self, cur, drone: str) -> str:
         cfg = BOT_SCHEMAS[drone]
         cols = await self._table_columns(cur, cfg["schema"], cfg["playback"])
+        queue_cols = await self._table_columns(cur, cfg["schema"], cfg["queue"])
+        backup_cols = await self._table_columns(cur, cfg["schema"], cfg["backup"])
+        home_cols = await self._table_columns(cur, cfg["schema"], cfg["home"])
         channel_expr = "p.channel_id" if "channel_id" in cols else "NULL"
         text_expr = "p.text_channel_id" if "text_channel_id" in cols else "NULL"
         pos_expr = "p.position_seconds" if "position_seconds" in cols else "0"
@@ -163,15 +165,20 @@ class EventBus:
         else:
             track_expr = "NULL"
         updated_expr = "TIMESTAMPDIFF(SECOND, p.updated_at, NOW())" if "updated_at" in cols else "NULL"
+        playback_filter = f"WHERE (p.bot_name IS NULL OR p.bot_name = '{drone}')" if "bot_name" in cols else ""
+        queue_filter = f" AND (q.bot_name IS NULL OR q.bot_name = '{drone}')" if "bot_name" in queue_cols else ""
+        backup_filter = f" AND (b.bot_name IS NULL OR b.bot_name = '{drone}')" if "bot_name" in backup_cols else ""
+        home_join = f"h.guild_id = p.guild_id AND (h.bot_name IS NULL OR h.bot_name = '{drone}')" if "bot_name" in home_cols else "h.guild_id = p.guild_id"
         return f"""
                 SELECT p.guild_id, {channel_expr} AS channel_id, {text_expr} AS text_channel_id,
                        {track_expr} AS current_track, {pos_expr} AS position_seconds, {play_expr} AS is_playing,
                        {updated_expr} AS updated_seconds,
                        h.home_vc_id,
-                       (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['queue']} q WHERE q.guild_id = p.guild_id) AS queue_count,
-                       (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['backup']} b WHERE b.guild_id = p.guild_id) AS backup_count
+                       (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['queue']} q WHERE q.guild_id = p.guild_id{queue_filter}) AS queue_count,
+                       (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['backup']} b WHERE b.guild_id = p.guild_id{backup_filter}) AS backup_count
                 FROM {cfg['schema']}.{cfg['playback']} p
-                LEFT JOIN {cfg['schema']}.{cfg['home']} h ON h.guild_id = p.guild_id
+                LEFT JOIN {cfg['schema']}.{cfg['home']} h ON {home_join}
+                {playback_filter}
                 """
 
     async def emit_event(
@@ -239,7 +246,6 @@ class EventBus:
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:40]
 
     async def _sync_bot_state(self, cur, drone: str) -> None:
-        cfg = BOT_SCHEMAS[drone]
         try:
             query = await self._playback_sync_query(cur, drone)
             await cur.execute(query)
@@ -388,8 +394,8 @@ class EventBus:
                 async with conn.cursor(self._dict_cursor()) as cur:
                     await cur.execute(
                         "SELECT id, event_type, source_system, bot_name, guild_id, severity, payload_json, created_at "
-                        "FROM aria_swarm_events WHERE processed = FALSE AND id > %s ORDER BY id ASC LIMIT %s",
-                        (self._last_claimed_id, limit),
+                        "FROM aria_swarm_events WHERE processed = FALSE ORDER BY id ASC LIMIT %s",
+                        (limit,),
                     )
                     rows = await cur.fetchall() or []
                     events: list[dict[str, Any]] = []

@@ -74,7 +74,7 @@ class Surveillance(commands.Cog):
             embed = discord.Embed(title=f"🕵️ Surveillance Log: {target.display_name}", description=response.text[:4096], color=discord.Color.red())
             embed.set_footer(text=f"Aria analyzed their last {len(messages)} messages.")
             await interaction.followup.send(embed=embed)
-        except Exception as e:
+        except Exception:
             await interaction.followup.send("They talk so much nonsense my AI refused to read it.")
 
     @surveillance_group.command(name="wall_of_shame", description="Show the members with the worst backlog of unfinished tasks.")

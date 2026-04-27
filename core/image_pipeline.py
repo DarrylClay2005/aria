@@ -240,6 +240,7 @@ def upscale_with_realesrgan(
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         if completed.returncode != 0:
             stderr = completed.stderr.strip() or completed.stdout.strip()

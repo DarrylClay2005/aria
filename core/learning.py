@@ -220,7 +220,7 @@ class LearningEngine:
         if isinstance(row, dict):
             return row
         cols = ["preferred_cooldown_seconds", "confidence_bias", "repair_success_count", "repair_failure_count", "notes"]
-        return dict(zip(cols, row))
+        return dict(zip(cols, row, strict=False))
 
     async def update_policy_hint(self, *, scope_key: str, issue_type: str, success: bool, confidence: float, notes: str | None = None) -> None:
         if not db.pool:
@@ -615,6 +615,8 @@ class LearningEngine:
             parts.append("Past conversation patterns similar to this prompt: " + "; ".join(similar_conversations) + ".")
         if repair_patterns:
             parts.append("Recent successful repair patterns: " + "; ".join(repair_patterns) + ".")
+        if scoped_repair_hints:
+            parts.append("Repair actions that worked for similar symptoms: " + "; ".join(scoped_repair_hints) + ".")
         if command_families:
             parts.append("Command families Aria sees most often: " + "; ".join(command_families) + ".")
         return "\n".join(parts)

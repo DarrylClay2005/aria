@@ -28,6 +28,9 @@ class Bounty(commands.Cog):
 
     # Initialize the bounty table
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("bounty: database pool unavailable; table init skipped.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""

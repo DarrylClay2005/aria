@@ -11,7 +11,7 @@ from core.database import db
 
 logger = logging.getLogger("discord")
 BOT_NAME = "aria"
-_installed = False
+_INSTALLED_ERROR_HANDLERS = []
 
 
 def _env_first(*names: str) -> str:
@@ -130,7 +130,8 @@ async def _send_embed_to_url(url: str, *, title, description, color, retries=3, 
     return False
 
 
-async def send_ops_webhook_log(title, description, color=discord.Color.gold(), retries=3, fields=None, username="Ops Node: Aria"):
+async def send_ops_webhook_log(title, description, color=None, retries=3, fields=None, username="Ops Node: Aria"):
+    color = color or discord.Color.gold()
     await _send_embed_to_url(
         OPS_WEBHOOK_URL,
         title=title,
@@ -143,7 +144,8 @@ async def send_ops_webhook_log(title, description, color=discord.Color.gold(), r
     )
 
 
-async def send_webhook_log(title, description, color=discord.Color.blurple(), retries=3, fields=None, username="Aria"):
+async def send_webhook_log(title, description, color=None, retries=3, fields=None, username="Aria"):
+    color = color or discord.Color.blurple()
     await _send_embed_to_url(
         WEBHOOK_URL,
         title=title,
@@ -156,7 +158,8 @@ async def send_webhook_log(title, description, color=discord.Color.blurple(), re
     )
 
 
-async def send_error_webhook_log(title, description, color=discord.Color.red(), retries=3, fields=None, traceback_text=None):
+async def send_error_webhook_log(title, description, color=None, retries=3, fields=None, traceback_text=None):
+    color = color or discord.Color.red()
     await _persist_error_event(title, description, traceback_text=traceback_text)
     if not ERROR_WEBHOOK_URL or ERROR_WEBHOOK_URL == "PASTE_YOUR_NEW_WEBHOOK_URL_HERE":
         return
@@ -227,13 +230,13 @@ class AriaErrorWebhookHandler(logging.Handler):
 
 
 def install_error_reporting():
-    global _installed
-    if _installed:
+    if _INSTALLED_ERROR_HANDLERS:
         return
     handler = AriaErrorWebhookHandler(level=logging.ERROR)
     handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(handler)
     logging.getLogger().addHandler(handler)
+    _INSTALLED_ERROR_HANDLERS.append(handler)
 
     def excepthook(exc_type, exc, tb):
         dispatch_runtime_error(
@@ -245,7 +248,6 @@ def install_error_reporting():
             level="critical",
         )
     sys.excepthook = excepthook
-    _installed = True
 
 
 def install_loop_exception_handler(loop=None):

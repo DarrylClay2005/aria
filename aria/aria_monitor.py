@@ -15,7 +15,7 @@ class Monitor:
         self._last_full_scan = 0.0
 
     async def start(self):
-        from core.webhooks import send_ops_webhook_log
+        from core.webhooks import send_error_webhook_log, send_ops_webhook_log
         while True:
             try:
                 await self.bus.sync_swarm_sources()
@@ -23,15 +23,37 @@ class Monitor:
                     await self.engine.run_pending_repairs()
                     await self.engine.run_pending_infra_tasks()
                     for event in await self.bus.claim_events(limit=50):
+                        handled = False
+                        error_text = None
                         try:
-                            await self.engine.handle_event(event)
-                            # --- Swarm Ops Feed: Send all processed events ---
+                            handled = await self.engine.handle_event(event)
+                        except Exception as exc:
+                            error_text = f"{type(exc).__name__}: {exc}"
+                            logger.exception("[Monitor] Failed to handle swarm event %s.", event.get("id"))
                             try:
-                                title = f"Swarm Event: {event.get('event_type','unknown')}"
-                                desc = f"Bot: {event.get('bot_name','n/a')} | Guild: {event.get('guild_id','n/a')}\nSource: {event.get('source_system','n/a')}\nSeverity: {event.get('severity','info')}\nPayload: {event.get('payload','{}')}"
-                                await send_ops_webhook_log(title, desc)
-                            except Exception as wh_exc:
-                                logger.warning(f"[Monitor] Failed to send ops webhook: {wh_exc}")
+                                await send_error_webhook_log(
+                                    "Aria Swarm Event Handler Error",
+                                    error_text,
+                                    fields=[
+                                        ("Event ID", str(event.get("id", "n/a")), True),
+                                        ("Event Type", str(event.get("event_type", "unknown"))[:128], True),
+                                    ],
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            title = f"Swarm Event: {event.get('event_type','unknown')}"
+                            desc = (
+                                f"Bot: {event.get('bot_name','n/a')} | Guild: {event.get('guild_id','n/a')}\n"
+                                f"Source: {event.get('source_system','n/a')}\n"
+                                f"Severity: {event.get('severity','info')}\n"
+                                f"Handled: {handled}\n"
+                                f"Payload: {event.get('payload','{}')}"
+                            )
+                            fields = [("Handler Error", error_text[:1024], False)] if error_text else None
+                            await send_ops_webhook_log(title, desc, fields=fields)
+                        except Exception as wh_exc:
+                            logger.warning(f"[Monitor] Failed to send ops webhook: {wh_exc}")
                         finally:
                             await self.bus.mark_processed(event["id"])
                     now = asyncio.get_running_loop().time()

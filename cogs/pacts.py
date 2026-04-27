@@ -8,6 +8,7 @@ from discord.ext import commands
 from google import genai
 from google.genai import types
 
+from core.database import db
 from core.db_helpers import db_cursor
 
 logger = logging.getLogger("discord")
@@ -21,6 +22,9 @@ class Pacts(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("pacts: database pool unavailable; table init skipped.")
+            return
         async with db_cursor() as cur:
             await cur.execute(
                 """

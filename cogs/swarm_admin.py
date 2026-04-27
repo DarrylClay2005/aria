@@ -8,7 +8,7 @@ from typing import Any
 
 from core.database import db
 from core.swarm_control import ensure_guild_settings_schema
-from core.webhooks import send_webhook_log, send_error_webhook_log
+from core.webhooks import send_webhook_log
 
 logger = logging.getLogger("discord")
 

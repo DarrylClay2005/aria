@@ -1,4 +1,3 @@
-import asyncio
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -82,7 +81,7 @@ class Social(commands.Cog):
                     await cur.execute("SELECT genre, play_count FROM discord_music_gws.gws_user_music_tastes WHERE user_id = %s ORDER BY play_count DESC LIMIT 3", (target.id,))
                     music_rows = await cur.fetchall()
                     music_tastes = ", ".join([f"{_row_get(row, 'genre', 0, 'Unknown')} ({_row_get(row, 'play_count', 1, 0)} plays)" for row in music_rows]) if music_rows else "No tracked music taste. Probably listens to silence."
-                except: 
+                except Exception:
                     pending_tasks = 0
                     music_tastes = "Unknown"
 
@@ -102,7 +101,7 @@ class Social(commands.Cog):
             await interaction.followup.send(embed=embed)
         except AIServiceUnavailable as exc:
             await interaction.followup.send(exc.public_message)
-        except:
+        except Exception:
             await interaction.followup.send("They are so incredibly boring my AI refused to profile them.")
 
 async def setup(bot):

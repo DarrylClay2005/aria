@@ -14,6 +14,9 @@ class Productivity(commands.Cog):
         self.ai_service = AIService()
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("productivity: database pool unavailable; table init skipped.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""
@@ -121,7 +124,8 @@ class Productivity(commands.Cog):
         await asyncio.sleep(1500)
         try:
             await interaction.channel.send(f"🔔 {interaction.user.mention}, your 25 minutes are up. You may now take a 5-minute break to feed your limited human attention span.")
-        except: pass
+        except Exception:
+            logger.exception("Failed to send pomodoro completion ping.")
 
 async def setup(bot):
     await bot.add_cog(Productivity(bot))

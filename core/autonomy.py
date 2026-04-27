@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 from dataclasses import dataclass
 from typing import Any
 
@@ -572,12 +571,13 @@ class AutonomousEngine:
                     if target:
                         await self._queue_infra_task(issue, target=target, action='restart', reason='repair plan exhausted after follow-up retries')
                 continue
-            success = await self.fix_issue({**issue, '_strategy_index': int(task.get('strategy_index') or 0) + 1, '_attempt_count': next_attempt, '_from_followup': True})
+            next_strategy_index = int(task.get('strategy_index') or 0) + 1
+            success = await self.fix_issue({**issue, '_strategy_index': next_strategy_index, '_attempt_count': next_attempt, '_from_followup': True})
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE aria_repair_tasks SET status=%s, attempt_count=%s, strategy_index=%s, due_at=DATE_ADD(NOW(), INTERVAL %s SECOND), last_result=%s WHERE id=%s",
-                        ('pending' if success else 'failed', next_attempt, int(task.get('strategy_index') or 0) + 1, int(self._repair_followup_delay), 'next repair step executed' if success else 'follow-up repair failed', task['id'])
+                        ('pending', next_attempt, next_strategy_index, int(self._repair_followup_delay), 'next repair step executed' if success else 'follow-up repair did not verify; retrying next strategy', task['id'])
                     )
 
     @staticmethod
@@ -1133,8 +1133,12 @@ class AutonomousEngine:
         issue_type = issue.get("type")
         if issue_type == "queue_rebuild_needed":
             return queue_count > 0
-        if issue_type in {"recover_from_queue", "stalled_playback_candidate"}:
-            return queue_count > 0 and ((playback or {}).get("channel_id") is not None)
+        if issue_type in {"recover_from_queue", "stalled_playback_candidate", "predictive_stall_risk"}:
+            playback = playback or {}
+            return bool(
+                playback.get("channel_id")
+                and (playback.get("is_playing") or playback.get("current_track") or queue_count > 0)
+            )
         if issue_type in {"invalid_playback_state", "invalid_position"}:
             pos_ok = True
             if playback is not None and issue_type == "invalid_position":
@@ -1260,7 +1264,7 @@ class AutonomousEngine:
                             f"Executed {result.action} on {drone} for guild {issue.get('guild_id', 'n/a')}.",
                             fields=[("Details", result.details or "n/a", False)],
                         )
-                    else:
+                    elif not issue.get("_from_followup"):
                         strategy_plan = await self._choose_action_plan(issue)
                         next_index = int(issue.get('_strategy_index', 0) or 0) + 1
                         attempt_count = int(issue.get('_attempt_count', 0) or 0) + 1

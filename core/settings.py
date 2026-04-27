@@ -16,7 +16,7 @@ REAL_ESRGAN_MODEL_DIR = PROJECT_ROOT / "models"
 
 _DEFAULT_SHARED_ENV_DIR = "Music"
 _DEFAULT_OVERRIDE_USER_ID = "1304564041863266347"
-_loaded_env_file = None
+_ENV_STATE = {"loaded_file": None}
 
 
 def _build_external_env_path() -> Path:
@@ -25,10 +25,8 @@ def _build_external_env_path() -> Path:
 
 
 def load_external_env() -> Path | None:
-    global _loaded_env_file
-
-    if _loaded_env_file is not None:
-        return _loaded_env_file
+    if _ENV_STATE["loaded_file"] is not None:
+        return _ENV_STATE["loaded_file"]
 
     explicit_env_file = os.getenv(f"{BOT_ENV_PREFIX}_ENV_FILE", "").strip()
     candidates = []
@@ -41,8 +39,8 @@ def load_external_env() -> Path | None:
     for candidate in candidates:
         if candidate.is_file():
             load_dotenv(candidate, override=False)
-            _loaded_env_file = candidate
-            return _loaded_env_file
+            _ENV_STATE["loaded_file"] = candidate
+            return candidate
 
     return None
 

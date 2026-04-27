@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 import logging
 import json
-import os
 from core.database import db
 
 logger = logging.getLogger("discord")
@@ -18,6 +17,9 @@ class InteractionLogger(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("interaction_logger: database pool unavailable; table init skipped.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""

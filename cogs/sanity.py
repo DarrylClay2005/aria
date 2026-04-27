@@ -12,6 +12,9 @@ class Sanity(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
+        if not db.pool:
+            logger.warning("sanity: database pool unavailable; table init skipped.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("""

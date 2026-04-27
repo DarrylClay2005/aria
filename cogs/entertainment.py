@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiomysql
 import logging
 import random
 import asyncio
@@ -58,7 +57,7 @@ class Entertainment(commands.Cog):
             msg = await self.bot.wait_for('message', timeout=15.0, check=check)
             if song['answer'] in msg.content.lower():
                 await self.update_balance(interaction.user.id, 100)
-                await interaction.followup.send(f"Not completely tone-deaf, I see. Correct. I've tossed **100 coins** your way.")
+                await interaction.followup.send("Not completely tone-deaf, I see. Correct. I've tossed **100 coins** your way.")
             else:
                 await self.update_balance(interaction.user.id, -50)
                 await interaction.followup.send(f"Fucking tragic. Your musical taste is as offensive as your voice. The next line is '{song['answer'].title()}'. I'm fining you **50 coins** for hurting my ears.")
