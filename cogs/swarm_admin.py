@@ -537,6 +537,132 @@ class SwarmAdmin(commands.Cog):
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {e}")
 
+    # --- SWARM OPERATIONS: FAST FLEET-WIDE COMMANDS ---
+    @swarm_group.command(name="health", description="Show heartbeat, metrics, and queue health for every swarm node.")
+    async def health(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not getattr(db, "pool", None):
+            return await interaction.followup.send("❌ DB pool is missing. Aria cannot inspect swarm health.")
+        embed = discord.Embed(title="🩺 Swarm Health", color=discord.Color.teal())
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in DRONE_NAMES:
+                        health_row = None
+                        metric_row = None
+                        try:
+                            await cur.execute(f"SELECT status, TIMESTAMPDIFF(SECOND, last_pulse, NOW()) AS heartbeat_age FROM `{_db_name(b)}`.`swarm_health` WHERE bot_name = %s LIMIT 1", (b,))
+                            health_row = await cur.fetchone()
+                        except Exception:
+                            pass
+                        try:
+                            await cur.execute(
+                                f"SELECT voice_connected, player_playing, player_paused, queue_count, backup_queue_count, lavalink_ready, last_error, heartbeat_age_seconds "
+                                f"FROM {_q(b, 'metrics')} WHERE guild_id = %s AND bot_name = %s LIMIT 1",
+                                (interaction.guild_id, b),
+                            )
+                            metric_row = await cur.fetchone()
+                        except Exception:
+                            pass
+                        heartbeat_age = health_row.get("heartbeat_age") if health_row else None
+                        heartbeat_label = f"{heartbeat_age}s ago" if heartbeat_age is not None else "unknown"
+                        if metric_row:
+                            value = (
+                                f"Heartbeat: `{heartbeat_label}` | Lavalink: `{bool(metric_row.get('lavalink_ready'))}`"
+                                f"\nVoice: `{bool(metric_row.get('voice_connected'))}` | Playing: `{bool(metric_row.get('player_playing'))}` | Paused: `{bool(metric_row.get('player_paused'))}`"
+                                f"\nQueue: `{metric_row.get('queue_count') or 0}` | Backup: `{metric_row.get('backup_queue_count') or 0}`"
+                                f"\nError: `{str(metric_row.get('last_error') or 'none')[:120]}`"
+                            )
+                        else:
+                            value = f"Heartbeat: `{heartbeat_label}`\nNo metrics row for this guild yet."
+                        embed.add_field(name=b.capitalize(), value=value, inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Health check failed: {e}")
+
+    @swarm_group.command(name="homes", description="List configured home voice/stage channels for every node.")
+    async def homes(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        lines = []
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in DRONE_NAMES:
+                        channel_id = await _home_channel(cur, b, int(interaction.guild_id or 0))
+                        lines.append(f"`{b}` → {f'<#{channel_id}>' if channel_id else 'not set'}")
+            await interaction.followup.send("**Swarm Home Channels**\n" + "\n".join(lines))
+        except Exception as e:
+            await interaction.followup.send(f"❌ Home scan failed: {e}")
+
+    @swarm_group.command(name="summon_all", description="Summon every node with a configured home channel back to voice.")
+    async def summon_all(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        summoned = []
+        missing = []
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in DRONE_NAMES:
+                        channel_id = await _home_channel(cur, b, int(interaction.guild_id or 0))
+                        if not channel_id:
+                            missing.append(b)
+                            continue
+                        await _insert_direct_order(cur, b, int(interaction.guild_id or 0), channel_id, interaction.channel_id, "RECOVER")
+                        summoned.append(b)
+                    await conn.commit()
+            msg = f"📡 Summon orders queued for: {', '.join(summoned) if summoned else 'none'}"
+            if missing:
+                msg += f"\nNo home channel set: {', '.join(missing)}"
+            await interaction.followup.send(msg)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Summon failed: {e}")
+
+    @swarm_group.command(name="leave_all", description="Order every swarm node to leave voice in this server.")
+    async def leave_all(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in DRONE_NAMES:
+                        await _insert_direct_order(cur, b, int(interaction.guild_id or 0), None, interaction.channel_id, "LEAVE")
+                    await conn.commit()
+            await interaction.followup.send("📴 Leave orders queued for every swarm node.")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Leave-all failed: {e}")
+
+    @swarm_group.command(name="restart_all", description="Restart every music worker through its container supervisor.")
+    async def restart_all(self, interaction: discord.Interaction, confirm: bool = False):
+        await interaction.response.defer(ephemeral=True)
+        if not confirm:
+            return await interaction.followup.send("Set `confirm` to true if you really want to restart every music worker.")
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in DRONE_NAMES:
+                        await _push_override(cur, b, 0, "RESTART")
+                    await conn.commit()
+            await interaction.followup.send("♻️ Restart overrides committed for every music worker.")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Restart-all failed: {e}")
+
+    @swarm_group.command(name="set_feedback_all", description="Set the feedback text channel for every swarm node in this server.")
+    async def set_feedback_all(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    for b in DRONE_NAMES:
+                        await ensure_guild_settings_schema(cur, b)
+                        await cur.execute(
+                            f"INSERT INTO {_q(b, 'guild_settings')} (guild_id, feedback_channel_id) VALUES (%s, %s) "
+                            "ON DUPLICATE KEY UPDATE feedback_channel_id = %s",
+                            (interaction.guild_id, channel.id, channel.id),
+                        )
+                    await conn.commit()
+            await interaction.followup.send(f"📣 Feedback channel set to {channel.mention} for every swarm node.")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Feedback update failed: {e}")
+
 
 async def setup(bot):
     await bot.add_cog(SwarmAdmin(bot))
