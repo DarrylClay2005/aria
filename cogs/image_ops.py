@@ -654,6 +654,43 @@ class ImageOps(commands.Cog):
         logger.error(f"Image search failed after retries: {last_exc}")
         await interaction.followup.send(f"❌ Network Fetch Error: {last_exc}")
 
+
+    @image_group.command(name="enhance", description="AI-enhance an uploaded image or direct image URL.")
+    @app_commands.describe(
+        image="Upload an image to enhance.",
+        image_url="Direct image URL to enhance if you do not upload a file.",
+        anime="Use the anime-focused Real-ESRGAN model.",
+    )
+    async def enhance(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment | None = None,
+        image_url: str | None = None,
+        anime: bool = False,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+
+        source_url = image.url if image and image.content_type and image.content_type.startswith("image/") else None
+        if image and not source_url:
+            await interaction.followup.send("❌ That attachment does not look like an image.", ephemeral=True)
+            return
+        source_url = source_url or (image_url.strip() if image_url else None)
+        if not source_url:
+            await interaction.followup.send("❌ Upload an image or provide a direct image URL.", ephemeral=True)
+            return
+
+        candidate = ImageCandidate(source_url=source_url, title="anime" if anime else "")
+        try:
+            rendered = await self.build_upscaled_image("anime" if anime else "photo", candidate)
+            file = self.rendered_to_file(rendered, "aria_ai_enhanced")
+            embed = discord.Embed(title="✨ AI Enhancement Complete", color=discord.Color.green())
+            embed.description = f"Enhanced size: **{rendered.width}x{rendered.height}**"
+            embed.set_image(url=f"attachment://{file.filename}")
+            await interaction.followup.send(embed=embed, file=file)
+        except Exception as exc:
+            logger.exception("Direct image enhance failed: %s", exc)
+            await interaction.followup.send(f"❌ Enhancement failed: {exc}", ephemeral=True)
+
     @image_group.command(name="vault", description="Retrieve an image previously saved in the Visual Vault.")
     async def vault_get(self, interaction: discord.Interaction, keyword: str) -> None:
         await interaction.response.defer()

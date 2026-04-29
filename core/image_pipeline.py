@@ -6,6 +6,8 @@ import io
 import json
 from pathlib import Path
 import re
+import os
+import shutil
 import subprocess
 import tempfile
 from typing import Iterable
@@ -197,6 +199,45 @@ def render_forge_image(text: str, *, background_color: str = "black") -> Rendere
     return _rendered_image(image, extension="png")
 
 
+def _resolve_realesrgan_binary(binary_path: str | Path) -> Path:
+    """Accept the exact executable, an install directory, or a PATH command."""
+    raw = Path(str(binary_path)).expanduser()
+    candidates: list[Path] = []
+    if raw.is_dir():
+        candidates.append(raw / "realesrgan-ncnn-vulkan")
+    candidates.append(raw)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            if not os.access(candidate, os.X_OK):
+                try:
+                    candidate.chmod(candidate.stat().st_mode | 0o111)
+                except OSError:
+                    pass
+            if os.access(candidate, os.X_OK):
+                return candidate
+
+    found = shutil.which(str(binary_path))
+    if found:
+        return Path(found)
+
+    raise FileNotFoundError(
+        "Real-ESRGAN executable is missing or not executable. "
+        f"Checked: {', '.join(str(c) for c in candidates)}"
+    )
+
+
+def _resolve_realesrgan_models(model_dir: str | Path, binary: Path) -> Path:
+    raw = Path(str(model_dir)).expanduser()
+    candidates = [raw, binary.parent / "models", Path.cwd() / "models"]
+    for candidate in candidates:
+        if candidate.is_dir() and any(candidate.glob("*.param")) and any(candidate.glob("*.bin")):
+            return candidate
+    raise FileNotFoundError(
+        "Real-ESRGAN model directory is missing or incomplete. "
+        f"Checked: {', '.join(str(c) for c in candidates)}"
+    )
+
 def upscale_with_realesrgan(
     source: bytes,
     *,
@@ -206,13 +247,8 @@ def upscale_with_realesrgan(
     scale: int = 4,
     blend_alpha: float = 0.72,
 ) -> RenderedImage:
-    binary = Path(binary_path)
-    models = Path(model_dir)
-
-    if not binary.is_file():
-        raise FileNotFoundError("Bundled Real-ESRGAN executable is missing.")
-    if not models.is_dir():
-        raise FileNotFoundError("Bundled Real-ESRGAN model directory is missing.")
+    binary = _resolve_realesrgan_binary(binary_path)
+    models = _resolve_realesrgan_models(model_dir, binary)
 
     base = _open_image(source).convert("RGB")
 
@@ -222,7 +258,8 @@ def upscale_with_realesrgan(
         output_path = temp_dir / "output.png"
         base.save(input_path, format="PNG")
 
-        completed = subprocess.run(
+        try:
+            completed = subprocess.run(
             [
                 str(binary),
                 "-i",
@@ -241,10 +278,22 @@ def upscale_with_realesrgan(
             capture_output=True,
             text=True,
             check=False,
-        )
+            timeout=180,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ImagePipelineError("Real-ESRGAN timed out after 180 seconds. Try a smaller image or lower tile size.") from exc
+        except OSError as exc:
+            raise ImagePipelineError(f"Real-ESRGAN could not start: {exc}") from exc
+
         if completed.returncode != 0:
             stderr = completed.stderr.strip() or completed.stdout.strip()
             raise ImagePipelineError(stderr or "Real-ESRGAN failed to produce an output image.")
+        if not output_path.is_file():
+            produced = sorted(temp_dir.glob("output*"))
+            if produced:
+                output_path = produced[0]
+            else:
+                raise ImagePipelineError("Real-ESRGAN completed but did not create an output image.")
 
         ai_image = _open_image(output_path.read_bytes()).convert("RGBA")
         resized_base = base.resize(ai_image.size, RESAMPLING.LANCZOS).convert("RGBA")

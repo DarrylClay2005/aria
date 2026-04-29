@@ -11,8 +11,8 @@ except ImportError:  # pragma: no cover - optional dependency in some local shel
 BOT_ENV_PREFIX = "ARIA"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COGS_DIR = PROJECT_ROOT / "cogs"
-REAL_ESRGAN_BINARY = PROJECT_ROOT / "realesrgan-ncnn-vulkan"
-REAL_ESRGAN_MODEL_DIR = PROJECT_ROOT / "models"
+REAL_ESRGAN_BINARY = Path(os.getenv("ARIA_REAL_ESRGAN_BINARY", os.getenv("REAL_ESRGAN_BINARY", str(PROJECT_ROOT / "realesrgan-ncnn-vulkan")))).expanduser()
+REAL_ESRGAN_MODEL_DIR = Path(os.getenv("ARIA_REAL_ESRGAN_MODEL_DIR", os.getenv("REAL_ESRGAN_MODEL_DIR", str(PROJECT_ROOT / "models")))).expanduser()
 
 _DEFAULT_SHARED_ENV_DIR = "Music"
 _DEFAULT_OVERRIDE_USER_ID = "1304564041863266347"

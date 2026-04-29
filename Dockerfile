@@ -13,5 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
+RUN chmod +x /app/realesrgan-ncnn-vulkan 2>/dev/null || true
 
 CMD ["python", "aria.py"]
