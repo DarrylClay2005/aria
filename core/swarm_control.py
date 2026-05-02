@@ -11,7 +11,7 @@ from core.database import db
 from core.override import override_manager
 
 
-DRONE_NAMES = ("gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream")
+DRONE_NAMES = ("gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire")
 FILTER_ALIASES = {
     "none": "none",
     "unfiltered": "none",

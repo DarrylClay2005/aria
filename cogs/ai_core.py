@@ -11,7 +11,7 @@ from core.webhooks import send_error_webhook_log
 
 logger = logging.getLogger("discord")
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
+DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 
 class AICore(commands.Cog):
     def __init__(self, bot):

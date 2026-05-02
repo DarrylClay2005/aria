@@ -12,7 +12,7 @@ from core.webhooks import send_webhook_log
 
 logger = logging.getLogger("discord")
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
+DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 DRONES = [app_commands.Choice(name=d.capitalize(), value=d) for d in DRONE_NAMES]
 VALID_COMMANDS = {"PLAY", "PAUSE", "RESUME", "SKIP", "STOP", "RESTART", "RECOVER", "LEAVE", "UPDATE_FILTER"}
 

@@ -15,7 +15,7 @@ from core.database import db
 
 logger = logging.getLogger("aria.event_bus")
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream"]
+DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 BOT_SCHEMAS = {
     drone: {
         "schema": f"discord_music_{drone}",
