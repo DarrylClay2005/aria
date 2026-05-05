@@ -241,8 +241,38 @@ class EventBus:
             label = "critical"
         return score, label
 
+    @staticmethod
+    def _staleness_bucket(updated_seconds: Any) -> str:
+        try:
+            age = float(updated_seconds or 0)
+        except Exception:
+            age = 0.0
+        if age <= 20:
+            return "fresh"
+        if age <= 60:
+            return "warm"
+        if age <= 150:
+            return "stale"
+        return "expired"
+
+    def _signature_payload(self, state: dict[str, Any]) -> dict[str, Any]:
+        # Guard against churn: volatile fields like playback position and raw age
+        # should not make Aria think an unchanged recovery state is brand new.
+        return {
+            "drone": state.get("drone"),
+            "guild_id": state.get("guild_id"),
+            "channel_id": state.get("channel_id"),
+            "text_channel_id": state.get("text_channel_id"),
+            "current_track": bool(state.get("current_track")),
+            "is_playing": bool(state.get("is_playing")),
+            "home_vc_id": state.get("home_vc_id"),
+            "queue_count": int(state.get("queue_count") or 0),
+            "backup_count": int(state.get("backup_count") or 0),
+            "staleness_bucket": self._staleness_bucket(state.get("updated_seconds")),
+        }
+
     def _signature(self, state: dict[str, Any]) -> str:
-        raw = json.dumps(state, sort_keys=True, default=str)
+        raw = json.dumps(self._signature_payload(state), sort_keys=True, default=str)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:40]
 
     async def _sync_bot_state(self, cur, drone: str) -> None:

@@ -67,6 +67,9 @@ class AutonomousEngine:
         self._max_repair_attempts = 3
         self._repair_followup_delay = 6.0
         self._infra_followup_delay = 15.0
+        self._recover_guard_seconds = max(60, int(os.getenv('ARIA_RECOVERY_GUARD_SECONDS', '300') or '300'))
+        self._queue_rebuild_guard_seconds = max(30, int(os.getenv('ARIA_QUEUE_REBUILD_GUARD_SECONDS', '180') or '180'))
+        self._state_normalize_guard_seconds = max(30, int(os.getenv('ARIA_STATE_GUARD_SECONDS', '120') or '120'))
         self._infra_timeout_seconds = max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45'))
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -153,6 +156,22 @@ class AutonomousEngine:
                         result_text TEXT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_target_created (target_name, created_at)
+                    )
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS aria_repair_guards (
+                        guard_key VARCHAR(255) PRIMARY KEY,
+                        guard_scope VARCHAR(96) NOT NULL,
+                        action_name VARCHAR(64) NOT NULL,
+                        issue_type VARCHAR(64) NOT NULL,
+                        bot_name VARCHAR(64) NULL,
+                        guild_id BIGINT NULL,
+                        details_json LONGTEXT NULL,
+                        last_triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_scope_time (guard_scope, last_triggered_at)
                     )
                     """
                 )
@@ -604,6 +623,86 @@ class AutonomousEngine:
         drone = issue.get("drone", "swarm")
         guild_id = issue.get("guild_id", "global")
         return f"{drone}:{guild_id}"[:64]
+
+    def _guard_window_seconds(self, issue: dict[str, Any], strategy: str) -> int:
+        if strategy == "recover_resume" or str(issue.get("type") or "") in {"recover_from_queue", "stalled_playback_candidate", "predictive_stall_risk"}:
+            return self._recover_guard_seconds
+        if strategy in {"queue_rebuild", "predictive_queue_rebalance"} or str(issue.get("type") or "") == "queue_rebuild_needed":
+            return self._queue_rebuild_guard_seconds
+        if strategy in {"normalize_playback_state", "clear_stale_orders"}:
+            return self._state_normalize_guard_seconds
+        return 0
+
+    async def _recent_direct_order_exists(self, issue: dict[str, Any], command: str, within_seconds: int) -> bool:
+        drone = str(issue.get("drone") or "").strip().lower()
+        guild_id = issue.get("guild_id")
+        if drone not in BOT_SCHEMAS or not guild_id or within_seconds <= 0 or not db.pool:
+            return False
+        cfg = BOT_SCHEMAS[drone]
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(self._dict_cursor()) as cur:
+                    await cur.execute(
+                        f"""
+                        SELECT COUNT(*) AS c
+                        FROM {cfg['schema']}.{cfg['direct']}
+                        WHERE bot_name=%s
+                          AND guild_id=%s
+                          AND command=%s
+                          AND TIMESTAMPDIFF(SECOND, COALESCE(created_at, NOW()), NOW()) <= %s
+                        """,
+                        (drone, guild_id, command.upper(), int(within_seconds)),
+                    )
+                    row = await cur.fetchone()
+        except Exception:
+            return False
+        return int((row or {}).get("c", 0)) > 0
+
+    async def _consume_repair_guard(self, issue: dict[str, Any], strategy: str, *, window_seconds: int) -> tuple[bool, str]:
+        if not db.pool or window_seconds <= 0:
+            return True, ""
+        await self.ensure_repair_tables()
+        guard_key = self._cooldown_key(issue, strategy)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(self._dict_cursor()) as cur:
+                await cur.execute(
+                    """
+                    SELECT TIMESTAMPDIFF(SECOND, last_triggered_at, NOW()) AS age_seconds
+                    FROM aria_repair_guards
+                    WHERE guard_key=%s
+                    LIMIT 1
+                    """,
+                    (guard_key,),
+                )
+                row = await cur.fetchone()
+                age_seconds = int((row or {}).get("age_seconds", window_seconds + 1) or window_seconds + 1)
+                if row and age_seconds < int(window_seconds):
+                    remaining = max(1, int(window_seconds) - age_seconds)
+                    return False, f"{strategy} is guarded for another {remaining}s"
+                await cur.execute(
+                    """
+                    INSERT INTO aria_repair_guards (guard_key, guard_scope, action_name, issue_type, bot_name, guild_id, details_json, last_triggered_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        guard_scope=VALUES(guard_scope),
+                        action_name=VALUES(action_name),
+                        issue_type=VALUES(issue_type),
+                        bot_name=VALUES(bot_name),
+                        guild_id=VALUES(guild_id),
+                        details_json=VALUES(details_json),
+                        last_triggered_at=NOW()
+                    """,
+                    (
+                        guard_key,
+                        self._scoped_repair_scope(issue)[:96],
+                        strategy[:64],
+                        str(issue.get("type") or "unknown")[:64],
+                        (str(issue.get("drone") or "")[:64] or None),
+                        issue.get("guild_id"),
+                        json.dumps(issue, default=str)[:4000],
+                    ),
+                )
+        return True, ""
 
     def _policy_scope_keys(self, issue: dict[str, Any]) -> list[str]:
         drone = str(issue.get("drone", "swarm"))
@@ -1226,6 +1325,19 @@ class AutonomousEngine:
                 strategy_plan = await self._choose_action_plan(issue)
                 strategy_index = int(issue.get('_strategy_index', 0) or 0)
                 current_strategy = strategy_plan[min(strategy_index, max(len(strategy_plan) - 1, 0))] if strategy_plan else action
+                if not issue.get("_from_followup"):
+                    guard_window = self._guard_window_seconds(issue, current_strategy)
+                    if current_strategy == "recover_resume" and guard_window > 0:
+                        if await self._recent_direct_order_exists(issue, "RECOVER", guard_window):
+                            result = RepairResult(True, "recover_guarded", drone or "swarm", details=f"recent RECOVER order already exists within {guard_window}s")
+                            await self._journal_repair(issue, result)
+                            return True
+                    if guard_window > 0:
+                        allowed, guard_reason = await self._consume_repair_guard(issue, current_strategy, window_seconds=guard_window)
+                        if not allowed:
+                            result = RepairResult(True, f"guarded_{current_strategy}", drone or "swarm", details=guard_reason)
+                            await self._journal_repair(issue, result)
+                            return True
                 if issue["type"] == "guild_hotspot":
                     await send_ops_webhook_log("Aria Medic Guild Hotspot", f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.", fields=[("Bad Bots", str(issue.get('bad_bot_count', 0)), True), ("Bot Count", str(issue.get('bot_count', 0)), True), ("Issue", symptom, False)])
                     result = RepairResult(True, "hotspot_report", "swarm", details="reported guild hotspot requiring operator attention")
