@@ -12,6 +12,7 @@ from core.database import db
 logger = logging.getLogger("discord")
 BOT_NAME = "aria"
 _INSTALLED_ERROR_HANDLERS = []
+_DISABLED_WEBHOOK_URLS = set()
 
 
 def _env_first(*names: str) -> str:
@@ -63,6 +64,13 @@ def _trim(text, limit):
     return value[: limit - 3] + "..."
 
 
+def _is_unknown_webhook(exc: Exception) -> bool:
+    if isinstance(exc, discord.NotFound):
+        return True
+    text = str(exc or "").lower()
+    return "unknown webhook" in text or "error code: 10015" in text
+
+
 async def _persist_error_event(title, description, traceback_text=None, error_type="runtime", level="error"):
     if not getattr(db, "pool", None):
         return
@@ -102,7 +110,7 @@ async def _persist_error_event(title, description, traceback_text=None, error_ty
 
 
 async def _send_embed_to_url(url: str, *, title, description, color, retries=3, fields=None, username="Aria", footer="Aria Matrix", thumbnail_url=None):
-    if not url:
+    if not url or url in _DISABLED_WEBHOOK_URLS:
         return False
     for attempt in range(retries):
         try:
@@ -123,6 +131,10 @@ async def _send_embed_to_url(url: str, *, title, description, color, retries=3, 
                 await webhook.send(embed=embed, username=_trim(username, 80) or "Aria")
                 return True
         except Exception as exc:
+            if _is_unknown_webhook(exc):
+                _DISABLED_WEBHOOK_URLS.add(url)
+                logger.warning("Aria webhook disabled after Discord reported it no longer exists.")
+                return False
             if attempt >= retries - 1:
                 logger.warning("Aria webhook dispatch failed: %s", exc)
             else:
@@ -161,7 +173,11 @@ async def send_webhook_log(title, description, color=None, retries=3, fields=Non
 async def send_error_webhook_log(title, description, color=None, retries=3, fields=None, traceback_text=None):
     color = color or discord.Color.red()
     await _persist_error_event(title, description, traceback_text=traceback_text)
-    if not ERROR_WEBHOOK_URL or ERROR_WEBHOOK_URL == "PASTE_YOUR_NEW_WEBHOOK_URL_HERE":
+    if (
+        not ERROR_WEBHOOK_URL
+        or ERROR_WEBHOOK_URL == "PASTE_YOUR_NEW_WEBHOOK_URL_HERE"
+        or ERROR_WEBHOOK_URL in _DISABLED_WEBHOOK_URLS
+    ):
         return
     for attempt in range(retries):
         try:
@@ -182,6 +198,10 @@ async def send_error_webhook_log(title, description, color=None, retries=3, fiel
                 await webhook.send(embed=embed, username="Error Node: Aria")
                 return
         except Exception as exc:
+            if _is_unknown_webhook(exc):
+                _DISABLED_WEBHOOK_URLS.add(ERROR_WEBHOOK_URL)
+                print("[ARIA] Error webhook disabled after Discord reported it no longer exists.", file=sys.stderr)
+                return
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
