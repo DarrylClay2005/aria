@@ -62,6 +62,7 @@ class Stocks(commands.Cog):
                     change_percent = random.uniform(-0.25, 0.30)
                     new_price = max(5, int(current_price + (current_price * change_percent)))
                     await cur.execute("UPDATE aria_stocks SET previous_price = %s, price = %s WHERE symbol = %s", (current_price, new_price, symbol))
+                    await conn.commit()
 
     @market_loop.before_loop
     async def before_market_loop(self):
