@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -70,6 +71,12 @@ class AutonomousEngine:
         self._recover_guard_seconds = max(60, int(os.getenv('ARIA_RECOVERY_GUARD_SECONDS', '300') or '300'))
         self._queue_rebuild_guard_seconds = max(30, int(os.getenv('ARIA_QUEUE_REBUILD_GUARD_SECONDS', '180') or '180'))
         self._state_normalize_guard_seconds = max(30, int(os.getenv('ARIA_STATE_GUARD_SECONDS', '120') or '120'))
+        self._state_recovery_min_age_seconds = max(45, int(os.getenv('ARIA_RECOVERY_MIN_AGE_SECONDS', '120') or '120'))
+        self._playback_drift_min_age_seconds = max(30, int(os.getenv('ARIA_PLAYBACK_DRIFT_MIN_AGE_SECONDS', '90') or '90'))
+        self._predictive_queue_rebalance_min_delta = max(5, int(os.getenv('ARIA_PREDICTIVE_QUEUE_DRIFT_MIN_DELTA', '8') or '8'))
+        self._event_auto_recovery_max_age_seconds = max(20, int(os.getenv('ARIA_EVENT_AUTO_RECOVERY_MAX_AGE_SECONDS', '180') or '180'))
+        self._voice_timeout_pause_seconds = max(90, int(os.getenv('ARIA_VOICE_TIMEOUT_PAUSE_SECONDS', '240') or '240'))
+        self._retry_exhausted_pause_seconds = max(self._voice_timeout_pause_seconds, int(os.getenv('ARIA_RETRY_EXHAUSTED_PAUSE_SECONDS', '900') or '900'))
         self._infra_timeout_seconds = max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45'))
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -713,6 +720,37 @@ class AutonomousEngine:
                 )
         return True, ""
 
+    async def _arm_repair_guard(self, issue: dict[str, Any], strategy: str, *, window_seconds: int, note: str | None = None) -> None:
+        if not db.pool or window_seconds <= 0:
+            return
+        await self.ensure_repair_tables()
+        guard_key = self._cooldown_key(issue, strategy)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO aria_repair_guards (guard_key, guard_scope, action_name, issue_type, bot_name, guild_id, details_json, last_triggered_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        guard_scope=VALUES(guard_scope),
+                        action_name=VALUES(action_name),
+                        issue_type=VALUES(issue_type),
+                        bot_name=VALUES(bot_name),
+                        guild_id=VALUES(guild_id),
+                        details_json=VALUES(details_json),
+                        last_triggered_at=NOW()
+                    """,
+                    (
+                        guard_key,
+                        self._scoped_repair_scope(issue)[:96],
+                        strategy[:64],
+                        str(issue.get("type") or "unknown")[:64],
+                        (str(issue.get("drone") or "")[:64] or None),
+                        issue.get("guild_id"),
+                        json.dumps({"issue": issue, "note": note, "window_seconds": int(window_seconds)}, default=str)[:4000],
+                    ),
+                )
+
     def _policy_scope_keys(self, issue: dict[str, Any]) -> list[str]:
         drone = str(issue.get("drone", "swarm"))
         guild_id = str(issue.get("guild_id", "global"))
@@ -787,6 +825,122 @@ class AutonomousEngine:
         if issue.get("predictive_pressure"):
             score += min(0.18, float(issue.get("predictive_pressure") or 0.0) * 0.25)
         return max(0.0, min(0.98, score))
+
+    @staticmethod
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _issue_has_recovery_material(self, issue: dict[str, Any]) -> bool:
+        return bool(
+            issue.get("current_track")
+            or self._to_int(issue.get("queue_count")) > 0
+            or self._to_int(issue.get("backup_count")) > 0
+        )
+
+    def _issue_has_anchor(self, issue: dict[str, Any]) -> bool:
+        return bool(issue.get("home_vc_id") or issue.get("channel_id"))
+
+    def _issue_updated_seconds(self, issue: dict[str, Any]) -> float:
+        updated_seconds = self._to_float(issue.get("updated_seconds"), -1.0)
+        if updated_seconds >= 0:
+            return updated_seconds
+        if issue.get("updated_stale"):
+            return float(self._state_recovery_min_age_seconds)
+        return -1.0
+
+    def _event_age_seconds(self, event: dict[str, Any]) -> float:
+        created_at = str(event.get("created_at") or "").strip()
+        if not created_at:
+            return 0.0
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0.0, time.time() - dt.timestamp())
+
+    def _should_auto_act_on_issue(self, issue: dict[str, Any]) -> tuple[bool, str]:
+        issue_type = str(issue.get("type") or "")
+        is_playing = self._to_bool(issue.get("is_playing"))
+        is_paused = self._to_bool(issue.get("is_paused"))
+        has_anchor = self._issue_has_anchor(issue)
+        has_material = self._issue_has_recovery_material(issue)
+        updated_seconds = self._issue_updated_seconds(issue)
+        queue_count = self._to_int(issue.get("queue_count"))
+        backup_count = self._to_int(issue.get("backup_count"))
+
+        if issue_type == "recover_from_queue":
+            if is_paused:
+                return False, "playback is paused"
+            if is_playing:
+                return False, "bot is already playing"
+            if not has_material:
+                return False, "no recoverable queue or track state"
+            if not has_anchor:
+                return False, "no stable voice anchor"
+            if updated_seconds < self._state_recovery_min_age_seconds:
+                return False, f"state is only {max(0, int(updated_seconds))}s old"
+            return True, ""
+
+        if issue_type == "stalled_playback_candidate":
+            if is_paused:
+                return False, "playback is paused"
+            if not has_anchor:
+                return False, "no stable voice anchor"
+            if not has_material:
+                return False, "no queue or track state to preserve"
+            if updated_seconds < self._playback_drift_min_age_seconds:
+                return False, f"playback drift is only {max(0, int(updated_seconds))}s old"
+            return True, ""
+
+        if issue_type == "predictive_stall_risk":
+            pressure = self._to_float(issue.get("predictive_pressure"))
+            if pressure < 0.72:
+                return False, "predictive pressure is still too low"
+            if is_playing:
+                return False, "bot is still actively playing"
+            if is_paused:
+                return False, "playback is paused"
+            if not has_anchor:
+                return False, "no stable voice anchor"
+            if not has_material:
+                return False, "no queue or track state to preserve"
+            if updated_seconds < self._state_recovery_min_age_seconds:
+                return False, f"state is only {max(0, int(updated_seconds))}s old"
+            return True, ""
+
+        if issue_type == "predictive_queue_drift":
+            drift = backup_count - queue_count
+            if drift < self._predictive_queue_rebalance_min_delta:
+                return False, f"queue drift ({drift}) is below the rebalance threshold"
+            if is_playing:
+                return False, "bot is still actively playing"
+            if is_paused:
+                return False, "playback is paused"
+            if updated_seconds < self._state_recovery_min_age_seconds:
+                return False, f"state is only {max(0, int(updated_seconds))}s old"
+            return True, ""
+
+        return True, ""
 
     def _repair_plan(self, issue: dict[str, Any], action: str) -> list[str]:
         issue_type = issue.get("type")
@@ -980,6 +1134,7 @@ class AutonomousEngine:
         text_expr = "text_channel_id" if "text_channel_id" in cols else "NULL AS text_channel_id"
         pos_expr = "position_seconds" if "position_seconds" in cols else "0 AS position_seconds"
         play_expr = "is_playing" if "is_playing" in cols else "FALSE AS is_playing"
+        paused_expr = "is_paused" if "is_paused" in cols else "FALSE AS is_paused"
         if "current_track" in cols and "video_url" in cols and "title" in cols:
             track_expr = "COALESCE(NULLIF(current_track, ''), NULLIF(video_url, ''), NULLIF(title, '')) AS current_track"
         elif "current_track" in cols and "video_url" in cols:
@@ -997,7 +1152,7 @@ class AutonomousEngine:
         else:
             track_expr = "NULL AS current_track"
         updated_expr = "updated_at" if (include_updated and "updated_at" in cols) else ("NULL AS updated_at" if include_updated else None)
-        selects = ["guild_id", channel_expr, text_expr, track_expr, pos_expr, play_expr]
+        selects = ["guild_id", channel_expr, text_expr, track_expr, pos_expr, play_expr, paused_expr]
         if include_updated and updated_expr:
             selects.append(updated_expr)
         select_sql = ", ".join(selects)
@@ -1105,37 +1260,40 @@ class AutonomousEngine:
                         backup_count = int((backup_count_row or {}).get("c", 0))
                         home_vc_id = (home_row or {}).get("home_vc_id")
                         is_playing = bool(row.get("is_playing"))
+                        is_paused = bool(row.get("is_paused"))
+                        updated_seconds = -1.0
                         updated_stale = False
                         try:
                             updated_at = row.get("updated_at")
                             if updated_at is not None:
-                                age = (time.time() - updated_at.timestamp())
-                                updated_stale = age > 150
+                                updated_seconds = max(0.0, time.time() - updated_at.timestamp())
+                                updated_stale = updated_seconds > 150
                         except Exception:
                             updated_stale = False
+                        has_recovery_material = bool(queue_count > 0 or backup_count > 0 or row.get("current_track"))
                         if pending_orders and int((pending_orders or {}).get("c", 0)):
                             issues.append({"type": "stale_orders", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
                         if is_playing and not row.get("current_track") and queue_count == 0:
                             issues.append({"type": "invalid_playback_state", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
                         if (queue_count == 0 and backup_count > 0) or (row.get("current_track") and queue_count == 0):
-                            issues.append({"type": "queue_rebuild_needed", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track")})
-                        if home_vc_id and (queue_count > 0 or backup_count > 0 or row.get("current_track")) and not is_playing:
-                            issues.append({"type": "recover_from_queue", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track")})
+                            issues.append({"type": "queue_rebuild_needed", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "is_playing": is_playing, "is_paused": is_paused, "updated_seconds": updated_seconds})
+                        if home_vc_id and has_recovery_material and not is_playing and not is_paused and updated_seconds >= self._state_recovery_min_age_seconds:
+                            issues.append({"type": "recover_from_queue", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "channel_id": row.get("channel_id"), "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "is_playing": is_playing, "is_paused": is_paused, "updated_seconds": updated_seconds})
                         if row.get("position_seconds") is not None and float(row.get("position_seconds") or 0) < 0:
                             issues.append({"type": "invalid_position", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
                         if is_playing and updated_stale and (queue_count > 0 or backup_count > 0 or row.get("current_track")):
-                            issue = {"type": "stalled_playback_candidate", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "updated_stale": True}
+                            issue = {"type": "stalled_playback_candidate", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "channel_id": row.get("channel_id"), "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "updated_stale": True, "updated_seconds": updated_seconds, "is_playing": is_playing, "is_paused": is_paused}
                             issues.append(issue)
                             await self._record_predictive_signal(issue, "stall_risk", 0.72, details={"age_stale": True, "queue_count": queue_count, "backup_count": backup_count})
                             pressure = await self._predictive_pressure(issue, "stall_risk")
                             if pressure >= 0.65:
                                 issues.append({**issue, "type": "predictive_stall_risk", "predictive_pressure": pressure})
-                        if backup_count > 0 and queue_count > 0 and backup_count >= queue_count + 3:
-                            issue = {"type": "predictive_queue_drift", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track")}
+                        if backup_count > 0 and queue_count > 0 and backup_count >= queue_count + self._predictive_queue_rebalance_min_delta and not is_playing and not is_paused and updated_seconds >= self._state_recovery_min_age_seconds:
+                            issue = {"type": "predictive_queue_drift", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "channel_id": row.get("channel_id"), "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "is_playing": is_playing, "is_paused": is_paused, "updated_seconds": updated_seconds}
                             issues.append(issue)
                             await self._record_predictive_signal(issue, "queue_drift", min(1.0, 0.4 + ((backup_count - queue_count) / max(queue_count, 1)) * 0.08), details={"queue_count": queue_count, "backup_count": backup_count})
-                        if (queue_count > 0 or backup_count > 0 or row.get("current_track")) and not home_vc_id and not row.get("channel_id"):
-                            issues.append({"type": "missing_recovery_anchor", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
+                        if has_recovery_material and updated_seconds >= self._state_recovery_min_age_seconds and not home_vc_id and not row.get("channel_id"):
+                            issues.append({"type": "missing_recovery_anchor", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count, "updated_seconds": updated_seconds})
         if db.pool:
             try:
                 async with db.pool.acquire() as conn:
@@ -1306,6 +1464,15 @@ class AutonomousEngine:
                 return True
             elif issue["type"] in {"stale_swarm_node", "queue_rebuild_needed", "recover_from_queue", "invalid_playback_state", "invalid_position", "stale_orders", "stalled_playback_candidate", "predictive_queue_drift", "predictive_stall_risk", "missing_recovery_anchor", "drone_outlier", "drone_health_outlier", "guild_hotspot"}:
                 drone = issue.get("drone")
+                if issue["type"] in {"recover_from_queue", "stalled_playback_candidate", "predictive_stall_risk", "predictive_queue_drift"}:
+                    should_act, reason = self._should_auto_act_on_issue(issue)
+                    if not should_act:
+                        await self._journal_repair(
+                            issue,
+                            RepairResult(False, f"observe_{issue['type']}", drone or "swarm", details=reason),
+                            error="autonomy_gated",
+                        )
+                        return False
                 action_map = {
                     "queue_rebuild_needed": "queue_rebuild",
                     "recover_from_queue": "recover_resume",
@@ -1473,28 +1640,47 @@ class AutonomousEngine:
     async def handle_event(self, event: dict[str, Any]) -> bool:
         event_type = event.get("event_type")
         payload = dict(event.get("payload") or {})
+        event_age_seconds = self._event_age_seconds(event)
         if event_type == "recoverable_state_detected":
             issue = {
                 "type": "recover_from_queue",
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
+                "channel_id": payload.get("channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),
                 "current_track": payload.get("current_track"),
+                "is_playing": payload.get("is_playing"),
+                "is_paused": payload.get("is_paused"),
+                "updated_seconds": payload.get("updated_seconds"),
             }
+            if event_age_seconds > self._event_auto_recovery_max_age_seconds:
+                return False
+            should_act, _ = self._should_auto_act_on_issue(issue)
+            if not should_act:
+                return False
             return await self.fix_issue(issue)
         if event_type == "playback_state_drift":
             issue = {
                 "type": "stalled_playback_candidate",
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
+                "channel_id": payload.get("channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),
                 "current_track": payload.get("current_track"),
                 "updated_stale": True,
+                "is_playing": payload.get("is_playing"),
+                "is_paused": payload.get("is_paused"),
+                "updated_seconds": payload.get("updated_seconds"),
             }
+            if event_age_seconds > self._event_auto_recovery_max_age_seconds:
+                return False
+            should_act, _ = self._should_auto_act_on_issue(issue)
+            if not should_act:
+                return False
             return await self.fix_issue(issue)
         if event_type == "bot_error_logged":
             category = str(payload.get("error_category") or payload.get("error_type") or "").strip().lower()
@@ -1506,7 +1692,14 @@ class AutonomousEngine:
                     "guild_id": guild_id,
                     "current_track": payload.get("track_query"),
                 }
-                return await self.fix_issue(issue)
+                pause_seconds = self._retry_exhausted_pause_seconds if category == "recovery_retries_exhausted" else self._voice_timeout_pause_seconds
+                await self._arm_repair_guard(
+                    issue,
+                    "recover_resume",
+                    window_seconds=pause_seconds,
+                    note=f"Suppressed autonomous recovery after {category}.",
+                )
+                return False
             if category in {"stale_swarm_node", "heartbeat_stale"}:
                 issue = {
                     "type": "stale_swarm_node",
@@ -1521,12 +1714,21 @@ class AutonomousEngine:
                 "type": "predictive_stall_risk",
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
+                "channel_id": payload.get("channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),
                 "current_track": payload.get("current_track"),
+                "is_playing": payload.get("is_playing"),
+                "is_paused": payload.get("is_paused"),
+                "updated_seconds": payload.get("updated_seconds"),
                 "predictive_pressure": 0.75,
             }
+            if event_age_seconds > self._event_auto_recovery_max_age_seconds:
+                return False
+            should_act, _ = self._should_auto_act_on_issue(issue)
+            if not should_act:
+                return False
             return await self.fix_issue(issue)
         return False
 

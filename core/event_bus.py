@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
-import asyncio
+import os
 import re
 from typing import Any
 
@@ -37,6 +38,14 @@ class EventBus:
         self.bot = bot
         self._last_claimed_id = 0
         self._claim_lock = asyncio.Lock()
+        self._recovery_event_min_age_seconds = max(
+            45.0,
+            float(os.getenv("ARIA_RECOVERY_EVENT_MIN_AGE_SECONDS", "120") or "120"),
+        )
+        self._playback_drift_min_age_seconds = max(
+            30.0,
+            float(os.getenv("ARIA_PLAYBACK_DRIFT_MIN_AGE_SECONDS", "90") or "90"),
+        )
 
     @staticmethod
     def _dict_cursor():
@@ -151,6 +160,7 @@ class EventBus:
         text_expr = "p.text_channel_id" if "text_channel_id" in cols else "NULL"
         pos_expr = "p.position_seconds" if "position_seconds" in cols else "0"
         play_expr = "p.is_playing" if "is_playing" in cols else "FALSE"
+        paused_expr = "p.is_paused" if "is_paused" in cols else "FALSE"
         if "current_track" in cols and "video_url" in cols and "title" in cols:
             track_expr = "COALESCE(NULLIF(p.current_track, ''), NULLIF(p.video_url, ''), NULLIF(p.title, ''))"
         elif "current_track" in cols and "video_url" in cols:
@@ -175,6 +185,7 @@ class EventBus:
         return f"""
                 SELECT p.guild_id, {channel_expr} AS channel_id, {text_expr} AS text_channel_id,
                        {track_expr} AS current_track, {pos_expr} AS position_seconds, {play_expr} AS is_playing,
+                       {paused_expr} AS is_paused,
                        {updated_expr} AS updated_seconds,
                        h.home_vc_id,
                        (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['queue']} q WHERE q.guild_id = p.guild_id{queue_filter}) AS queue_count,
@@ -268,6 +279,7 @@ class EventBus:
             "text_channel_id": state.get("text_channel_id"),
             "current_track": bool(state.get("current_track")),
             "is_playing": bool(state.get("is_playing")),
+            "is_paused": bool(state.get("is_paused")),
             "home_vc_id": state.get("home_vc_id"),
             "queue_count": int(state.get("queue_count") or 0),
             "backup_count": int(state.get("backup_count") or 0),
@@ -320,6 +332,42 @@ class EventBus:
             "track_query": track_query,
         }
 
+    @staticmethod
+    def _has_recovery_material(state: dict[str, Any]) -> bool:
+        return bool(
+            state.get("current_track")
+            or int(state.get("queue_count") or 0) > 0
+            or int(state.get("backup_count") or 0) > 0
+        )
+
+    def _should_emit_recoverable_state(self, state: dict[str, Any]) -> bool:
+        if not self._has_recovery_material(state):
+            return False
+        if bool(state.get("is_playing")) or bool(state.get("is_paused")):
+            return False
+        if not (state.get("home_vc_id") or state.get("channel_id")):
+            return False
+        try:
+            updated_seconds = float(state.get("updated_seconds") or 0)
+        except Exception:
+            updated_seconds = 0.0
+        return updated_seconds >= self._recovery_event_min_age_seconds
+
+    def _should_emit_playback_drift(self, state: dict[str, Any]) -> bool:
+        if not bool(state.get("is_playing")):
+            return False
+        if bool(state.get("is_paused")):
+            return False
+        if not self._has_recovery_material(state):
+            return False
+        if state.get("home_vc_id") or state.get("channel_id"):
+            return False
+        try:
+            updated_seconds = float(state.get("updated_seconds") or 0)
+        except Exception:
+            updated_seconds = 0.0
+        return updated_seconds >= self._playback_drift_min_age_seconds
+
     async def _sync_bot_state(self, cur, drone: str) -> None:
         try:
             query = await self._playback_sync_query(cur, drone)
@@ -339,6 +387,7 @@ class EventBus:
                 "current_track": bool(row.get("current_track")),
                 "position_seconds": float(row.get("position_seconds") or 0),
                 "is_playing": bool(row.get("is_playing")),
+                "is_paused": bool(row.get("is_paused")),
                 "updated_seconds": float(row.get("updated_seconds") or 0),
                 "home_vc_id": row.get("home_vc_id"),
                 "queue_count": int(row.get("queue_count") or 0),
@@ -397,27 +446,26 @@ class EventBus:
                     payload={**state, "health_score": score, "status_label": label},
                     dedupe_key=f"evt:{drone}:{guild_id}:{signature}",
                 )
-                if state["queue_count"] > 0 or state["backup_count"] > 0 or state["current_track"]:
-                    if not state["is_playing"]:
-                        await self.emit_event(
-                            event_type="recoverable_state_detected",
-                            source_system="swarm_state",
-                            bot_name=drone,
-                            guild_id=guild_id,
-                            severity="warning",
-                            payload={**state, "health_score": score, "status_label": label},
-                            dedupe_key=f"recoverable:{drone}:{guild_id}:{signature}",
-                        )
-                    elif state["is_playing"] and not state["home_vc_id"] and not state["channel_id"]:
-                        await self.emit_event(
-                            event_type="playback_state_drift",
-                            source_system="swarm_state",
-                            bot_name=drone,
-                            guild_id=guild_id,
-                            severity="warning",
-                            payload={**state, "health_score": score, "status_label": label},
-                            dedupe_key=f"drift:{drone}:{guild_id}:{signature}",
-                        )
+                if self._should_emit_recoverable_state(state):
+                    await self.emit_event(
+                        event_type="recoverable_state_detected",
+                        source_system="swarm_state",
+                        bot_name=drone,
+                        guild_id=guild_id,
+                        severity="warning",
+                        payload={**state, "health_score": score, "status_label": label},
+                        dedupe_key=f"recoverable:{drone}:{guild_id}:{signature}",
+                    )
+                elif self._should_emit_playback_drift(state):
+                    await self.emit_event(
+                        event_type="playback_state_drift",
+                        source_system="swarm_state",
+                        bot_name=drone,
+                        guild_id=guild_id,
+                        severity="warning",
+                        payload={**state, "health_score": score, "status_label": label},
+                        dedupe_key=f"drift:{drone}:{guild_id}:{signature}",
+                    )
                 await self._set_cursor(cur, cursor_key, signature)
 
     async def _sync_bot_errors(self, cur, drone: str) -> None:
@@ -440,6 +488,10 @@ class EventBus:
             embedded_guild_id = self._extract_embedded_guild_id(description)
             guild_id = int(row.get("guild_id") or 0) or embedded_guild_id
             metadata = self._error_metadata(row.get("error_type"), description)
+            created_at_token = str(row.get("created_at") or "")[:19]
+            digest = hashlib.sha1(
+                f"{row.get('error_type')}|{guild_id}|{description}|{created_at_token}".encode("utf-8", "ignore")
+            ).hexdigest()[:16]
             await self.emit_event(
                 event_type="bot_error_logged",
                 source_system="bot_error_table",
@@ -452,7 +504,7 @@ class EventBus:
                     "created_at": str(row.get("created_at")),
                     **metadata,
                 },
-                dedupe_key=f"boterror:{drone}:{event_id}",
+                dedupe_key=f"boterror:{drone}:{guild_id or 0}:{metadata.get('error_category')}:{digest}",
             )
         if max_seen != last_id:
             await self._set_cursor(cur, cursor_key, str(max_seen))
