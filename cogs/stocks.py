@@ -6,6 +6,11 @@ import random
 from core.database import db
 
 logger = logging.getLogger("discord")
+MIN_STOCK_PRICE = 5
+MAX_STOCK_PRICE = 1_000_000_000_000
+HIGH_PRICE_THRESHOLD = 100_000_000
+NORMAL_VOLATILITY_RANGE = (-0.25, 0.30)
+HIGH_PRICE_VOLATILITY_RANGE = (-0.18, 0.12)
 
 class Stocks(commands.Cog):
     def __init__(self, bot):
@@ -26,9 +31,14 @@ class Stocks(commands.Cog):
                     CREATE TABLE IF NOT EXISTS aria_stocks (
                         symbol VARCHAR(10) PRIMARY KEY,
                         name VARCHAR(255),
-                        price INT,
-                        previous_price INT
+                        price BIGINT,
+                        previous_price BIGINT
                     )
+                """)
+                await cur.execute("""
+                    ALTER TABLE aria_stocks
+                    MODIFY COLUMN price BIGINT NOT NULL,
+                    MODIFY COLUMN previous_price BIGINT NOT NULL
                 """)
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS aria_portfolio (
@@ -54,15 +64,23 @@ class Stocks(commands.Cog):
     @tasks.loop(minutes=15.0)
     async def market_loop(self):
         # Fluctuate prices every 15 minutes
+        if not db.pool:
+            logger.warning("stocks: market loop skipped because database pool is unavailable.")
+            return
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT symbol, price FROM aria_stocks")
                 stocks = await cur.fetchall()
                 for symbol, current_price in stocks:
-                    change_percent = random.uniform(-0.25, 0.30)
-                    new_price = max(5, int(current_price + (current_price * change_percent)))
+                    floor_price = max(MIN_STOCK_PRICE, int(current_price or MIN_STOCK_PRICE))
+                    volatility_range = (
+                        HIGH_PRICE_VOLATILITY_RANGE if floor_price >= HIGH_PRICE_THRESHOLD else NORMAL_VOLATILITY_RANGE
+                    )
+                    change_percent = random.uniform(*volatility_range)
+                    new_price = int(round(floor_price + (floor_price * change_percent)))
+                    new_price = max(MIN_STOCK_PRICE, min(MAX_STOCK_PRICE, new_price))
                     await cur.execute("UPDATE aria_stocks SET previous_price = %s, price = %s WHERE symbol = %s", (current_price, new_price, symbol))
-                    await conn.commit()
+                await conn.commit()
 
     @market_loop.before_loop
     async def before_market_loop(self):
