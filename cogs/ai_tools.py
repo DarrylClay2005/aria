@@ -317,17 +317,17 @@ class AITools(commands.Cog):
 
     code_group = app_commands.Group(name="code", description="Have Aria review or debug code with maximum judgment.")
 
-    @code_group.command(name="check", description="Review a snippet or attached source file for bugs, risks, and concrete fixes.")
+    @code_group.command(name="check", description="Review an attached source file for bugs, logic issues, risks, and concrete fixes.")
     @app_commands.describe(
-        snippet="Paste code here, or use this as extra notes when attaching a file",
-        file="Optional source file for Aria to review end-to-end",
-        attach_fixed_file="If true, Aria also returns a corrected file attachment",
+        file="Source file for Aria to review end-to-end",
+        snippet="Optional notes, concerns, or extra context about the file",
+        attach_fixed_file="If true, Aria also returns a corrected file attachment now",
     )
     async def code_check(
         self,
         interaction: discord.Interaction,
+        file: discord.Attachment,
         snippet: str = "",
-        file: discord.Attachment | None = None,
         attach_fixed_file: bool = False,
     ):
         await interaction.response.defer(thinking=True)
@@ -335,8 +335,8 @@ class AITools(commands.Cog):
 
         system_inst = (
             self.get_system_instruction(score, interaction.user.display_name)
-            + " You are performing a code review. Prioritize bugs, risky assumptions, missing edge cases, maintainability problems, and clarity issues. "
-              "When a full file is provided, review the entire file and propose concrete corrections."
+            + " You are performing an advanced full-file code review. Hunt for syntax problems, broken logic, runtime bugs, async issues, race conditions, edge cases, null handling mistakes, API misuse, hidden regressions, maintainability issues, and weak assumptions. "
+              "Explain what is wrong, why it is wrong, how severe it is, and what the corrected implementation should do."
         )
 
         try:
@@ -347,12 +347,13 @@ class AITools(commands.Cog):
             response_text = await self.ask_aria(
                 interaction,
                 (
-                    "Review this code carefully.\n"
+                    "Review this file like a senior engineer doing a deep bug hunt.\n"
                     "Respond with:\n"
-                    "1. A short overall diagnosis.\n"
+                    "1. A short overall diagnosis of the file.\n"
                     "2. Numbered findings ordered by severity.\n"
                     "3. Exactly what needs to change and why.\n"
-                    "4. Corrected code or corrected sections. If the user requested a fixed file, mention that the complete corrected file is attached.\n\n"
+                    "4. Corrected code or corrected sections for the most important fixes.\n"
+                    "5. If a complete corrected file is not attached in this response, end by offering in your own voice to generate and upload the full corrected file.\n\n"
                     f"{code_prompt}"
                 ),
                 system_instruction=system_inst,
@@ -386,19 +387,19 @@ class AITools(commands.Cog):
                 f"Your code is so catastrophically bad it crashed my parser: {e}"
             )
 
-    @code_group.command(name="debug", description="Give Aria an error plus code or a file so she can trace the bug and fix it.")
+    @code_group.command(name="debug", description="Debug an attached source file, with optional traceback or extra context.")
     @app_commands.describe(
-        error_traceback="The traceback, failing log, or error message",
-        snippet="Paste code here, or use this as extra notes when attaching a file",
-        file="Optional source file for Aria to inspect in full",
-        attach_fixed_file="If true, Aria also returns a corrected file attachment",
+        file="Source file for Aria to inspect in full",
+        error_traceback="Optional traceback, failing log, or error message",
+        snippet="Optional notes, observed behavior, or extra context",
+        attach_fixed_file="If true, Aria also returns a corrected file attachment now",
     )
     async def code_debug(
         self,
         interaction: discord.Interaction,
-        error_traceback: str,
+        file: discord.Attachment,
+        error_traceback: str = "",
         snippet: str = "",
-        file: discord.Attachment | None = None,
         attach_fixed_file: bool = False,
     ):
         await interaction.response.defer(thinking=True)
@@ -406,8 +407,8 @@ class AITools(commands.Cog):
 
         system_inst = (
             self.get_system_instruction(score, interaction.user.display_name)
-            + " You are debugging broken code. Explain the root cause, call out file or line clues when the traceback provides them, and provide a concrete fix or corrected code. "
-              "When a full file is supplied, reason over the whole file instead of only isolated lines."
+            + " You are doing advanced code debugging. Trace likely execution paths, infer failure points even when the traceback is incomplete, and hunt for bad logic, broken assumptions, state bugs, async mistakes, edge cases, and hidden defects across the whole file. "
+              "Explain the root cause clearly and show what the corrected implementation should do."
         )
 
         try:
@@ -416,13 +417,14 @@ class AITools(commands.Cog):
                 attachment=file,
             )
             prompt = (
-                "The human hit this error. Debug it properly.\n\n"
-                f"Traceback or error details:\n{self._normalize_text(error_traceback)}\n\n"
+                "Debug this file thoroughly.\n\n"
+                f"Traceback or error details:\n{self._normalize_text(error_traceback) or 'None provided. Infer likely failure points from the file and user notes.'}\n\n"
                 "Respond with:\n"
                 "1. The most likely root cause.\n"
                 "2. Any line, function, or file clues you can infer from the traceback.\n"
                 "3. What needs to change and why.\n"
-                "4. Corrected code or corrected sections. If the user requested a fixed file, mention that the complete corrected file is attached.\n\n"
+                "4. Corrected code or corrected sections for the highest-impact fixes.\n"
+                "5. If a complete corrected file is not attached in this response, end by offering in your own voice to generate and upload the full corrected file.\n\n"
                 f"{code_prompt}"
             )
             response_text = await self.ask_aria(
