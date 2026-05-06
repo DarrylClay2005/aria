@@ -3,13 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import time
 
-from core.settings import GEMINI_MODEL_ID
+from core.settings import GEMINI_FALLBACK_MODELS, GEMINI_MODEL_ID
 
 logger = logging.getLogger("discord")
 DEFAULT_TIMEOUT_SECONDS = max(20, int(os.getenv("ARIA_AI_TIMEOUT_SECONDS", "90")))
 DEFAULT_PROMPT_LIMIT = max(4096, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "60000")))
 DEFAULT_SYSTEM_LIMIT = max(2048, int(os.getenv("ARIA_AI_MAX_SYSTEM_CHARS", "12000")))
+DEFAULT_MAX_RETRY_DELAY_SECONDS = max(3.0, float(os.getenv("ARIA_AI_MAX_RETRY_DELAY_SECONDS", "20")))
+DEFAULT_RETRY_ATTEMPTS = max(0, int(os.getenv("ARIA_AI_RETRY_ATTEMPTS", "1")))
+RETRY_DELAY_RE = re.compile(r"retry(?: in)?\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+RETRY_INFO_RE = re.compile(r"'retryDelay':\s*'([0-9]+)s'", re.IGNORECASE)
 
 
 class AIServiceUnavailable(RuntimeError):
@@ -27,8 +33,17 @@ class AIService:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         prompt_limit: int = DEFAULT_PROMPT_LIMIT,
         system_limit: int = DEFAULT_SYSTEM_LIMIT,
+        fallback_models: list[str] | None = None,
+        retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
+        max_retry_delay_seconds: float = DEFAULT_MAX_RETRY_DELAY_SECONDS,
     ):
         self.model_id = (model_id or GEMINI_MODEL_ID).strip() or "gemini-2.5-flash"
+        configured_fallbacks = fallback_models if fallback_models is not None else GEMINI_FALLBACK_MODELS
+        self.fallback_models = [
+            value.strip()
+            for value in (configured_fallbacks or [])
+            if value and value.strip() and value.strip() != self.model_id
+        ]
         self.api_key = (
             api_key
             or os.getenv("ARIA_GEMINI_API_KEY", "")
@@ -37,8 +52,58 @@ class AIService:
         self.timeout_seconds = max(20, int(timeout_seconds))
         self.prompt_limit = max(2048, int(prompt_limit))
         self.system_limit = max(1024, int(system_limit))
+        self.retry_attempts = max(0, int(retry_attempts))
+        self.max_retry_delay_seconds = max(1.0, float(max_retry_delay_seconds))
         self._client = None
         self._types = None
+        self._rate_limited_until = 0.0
+
+    @staticmethod
+    def _extract_retry_delay_seconds(message: str) -> float | None:
+        if not message:
+            return None
+        match = RETRY_DELAY_RE.search(message) or RETRY_INFO_RE.search(message)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_rate_limited_error(message: str) -> bool:
+        lowered = (message or "").lower()
+        return "resource_exhausted" in lowered or "quota exceeded" in lowered or "429" in lowered
+
+    @staticmethod
+    def _is_daily_quota_error(message: str) -> bool:
+        lowered = (message or "").lower()
+        return "perday" in lowered or "per day" in lowered or "current quota" in lowered
+
+    def _rate_limit_public_message(self, *, retry_after: float | None, used_fallbacks: bool) -> str:
+        if retry_after and retry_after <= self.max_retry_delay_seconds:
+            return (
+                f"My AI backend hit a temporary Gemini rate limit. Give me about {int(retry_after) + 1} seconds and try again."
+            )
+        if used_fallbacks:
+            return (
+                "My Gemini quota is tapped out across the configured models right now. Give it a bit and try again, or increase the API quota/billing."
+            )
+        return (
+            "My Gemini quota is tapped out right now. Give it a bit and try again, or increase the API quota/billing."
+        )
+
+    def _deduped_models(self) -> list[str]:
+        models = [self.model_id, *self.fallback_models]
+        seen = set()
+        ordered = []
+        for model in models:
+            clean = str(model or "").strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            ordered.append(clean)
+        return ordered
 
     @staticmethod
     def _clip_text(value: str | None, limit: int) -> str:
@@ -76,19 +141,84 @@ class AIService:
         prompt = self._clip_text(prompt, self.prompt_limit)
         system_instruction = self._clip_text(system_instruction, self.system_limit) if system_instruction else None
 
-        def _run_request() -> str:
+        now = time.monotonic()
+        if self._rate_limited_until > now:
+            remaining = self._rate_limited_until - now
+            raise AIServiceUnavailable(
+                f"Gemini requests temporarily paused for {remaining:.1f}s after recent rate limiting.",
+                self._rate_limit_public_message(retry_after=remaining, used_fallbacks=bool(self.fallback_models)),
+            )
+
+        def _run_request(model_id: str) -> str:
             config = None
             if system_instruction:
                 config = types.GenerateContentConfig(system_instruction=system_instruction)
             response = client.models.generate_content(
-                model=self.model_id,
+                model=model_id,
                 contents=prompt,
                 config=config,
             )
             return (getattr(response, "text", "") or "").strip()
 
         try:
-            return await asyncio.wait_for(asyncio.to_thread(_run_request), timeout=self.timeout_seconds)
+            models = self._deduped_models()
+            last_exc: Exception | None = None
+            used_fallbacks = len(models) > 1
+
+            for model_index, model_id in enumerate(models):
+                attempts_remaining = self.retry_attempts + 1
+                for _attempt in range(attempts_remaining):
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(_run_request, model_id),
+                            timeout=self.timeout_seconds,
+                        )
+                    except TimeoutError:
+                        raise
+                    except Exception as exc:
+                        text = str(exc)
+                        if not self._is_rate_limited_error(text):
+                            raise
+                        last_exc = exc
+                        retry_after = self._extract_retry_delay_seconds(text)
+                        is_daily_quota = self._is_daily_quota_error(text)
+                        has_next_model = model_index < len(models) - 1
+
+                        if has_next_model:
+                            logger.warning(
+                                "Gemini model %s hit rate/quota limits; trying fallback model %s.",
+                                model_id,
+                                models[model_index + 1],
+                            )
+                            break
+
+                        if (
+                            retry_after
+                            and retry_after <= self.max_retry_delay_seconds
+                            and not is_daily_quota
+                            and _attempt < attempts_remaining - 1
+                        ):
+                            logger.warning(
+                                "Gemini model %s rate-limited; retrying after %.1fs.",
+                                model_id,
+                                retry_after,
+                            )
+                            await asyncio.sleep(retry_after + 0.5)
+                            continue
+
+                        if retry_after:
+                            self._rate_limited_until = time.monotonic() + min(retry_after + 0.5, 300.0)
+                        raise AIServiceUnavailable(
+                            f"Gemini rate/quota limited on model {model_id}: {text}",
+                            self._rate_limit_public_message(retry_after=retry_after, used_fallbacks=used_fallbacks),
+                        ) from exc
+
+            if last_exc:
+                raise AIServiceUnavailable(
+                    f"Gemini exhausted all configured models: {last_exc}",
+                    self._rate_limit_public_message(retry_after=None, used_fallbacks=used_fallbacks),
+                ) from last_exc
+            raise AIServiceUnavailable("Gemini did not return a usable response.")
         except TimeoutError as exc:
             raise AIServiceUnavailable(
                 "Gemini request timed out.",
