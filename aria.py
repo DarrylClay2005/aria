@@ -7,7 +7,7 @@ from discord import app_commands
 # ================================
 # 🧠 ARIA SYSTEM IMPORTS
 # ================================
-from aria.aria_core import AriaCore
+from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
@@ -154,10 +154,28 @@ async def on_message(message):
 
     # 🧠 ARIA PROCESSING (SAFE LAYER)
     try:
-        response = await bot.aria_core.handle(message, message.content)
+        prompt = message.content.strip()
+        if prompt.lower().startswith("aria "):
+            prompt = prompt[5:].strip()
+        if not prompt:
+            prompt = "What?"
+
+        response = await bot.aria_core.handle(message, prompt)
 
         if response:
             await message.channel.send(response)
+            return
+
+        reply = await bot.aria_core.chat(
+            prompt,
+            system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
+            user_id=message.author.id,
+            guild_id=message.guild.id if message.guild else None,
+            user_name=message.author.display_name,
+            source_kind="prefix_chat",
+            response_style="prefix_chat",
+        )
+        await message.channel.send(reply)
 
     except Exception as e:
         logger.exception("[ARIA ERROR] %s", e)

@@ -83,6 +83,11 @@ def normalize_phrase(text: str) -> str:
     return lowered[:500]
 
 
+def compact_excerpt(text: str, *, limit: int = 180) -> str:
+    cleaned = NORMALIZE_RE.sub(" ", (text or "").strip())
+    return cleaned[:limit]
+
+
 class LearningEngine:
     async def initialize(self) -> None:
         if not db.pool:
@@ -147,6 +152,21 @@ class LearningEngine:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         UNIQUE KEY uniq_action_phrase (action_name, normalized_phrase)
+                    )
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS aria_recent_context (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT NULL,
+                        guild_id BIGINT NULL,
+                        source_kind VARCHAR(32) NOT NULL DEFAULT 'chat',
+                        prompt_text TEXT NOT NULL,
+                        reply_text TEXT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_recent_context_user_guild (user_id, guild_id, id),
+                        INDEX idx_recent_context_guild (guild_id, id)
                     )
                     """
                 )
@@ -376,6 +396,87 @@ class LearningEngine:
                     (pattern_type, normalized_input, normalized_output, response_style, user_id, user_id, guild_id),
                 )
 
+    async def record_recent_context(
+        self,
+        *,
+        user_id: int | None,
+        guild_id: int | None,
+        source_kind: str,
+        prompt: str,
+        reply: str | None = None,
+    ) -> None:
+        if not db.pool or (user_id is None and guild_id is None):
+            return
+        prompt_text = compact_excerpt(prompt, limit=3000)
+        reply_text = compact_excerpt(reply or "", limit=3000) or None
+        if not prompt_text:
+            return
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO aria_recent_context (
+                        user_id, guild_id, source_kind, prompt_text, reply_text
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (user_id, guild_id, source_kind[:32], prompt_text, reply_text),
+                )
+                await cur.execute(
+                    """
+                    DELETE FROM aria_recent_context
+                    WHERE created_at < NOW() - INTERVAL 14 DAY
+                    """
+                )
+
+    async def recent_context(
+        self,
+        *,
+        user_id: int | None,
+        guild_id: int | None,
+        limit: int = 4,
+    ) -> list[dict]:
+        if not db.pool or (user_id is None and guild_id is None):
+            return []
+
+        clauses = []
+        params = []
+        if guild_id is not None:
+            clauses.append("guild_id = %s")
+            params.append(guild_id)
+        if user_id is not None:
+            clauses.append("(user_id = %s OR user_id IS NULL)")
+            params.append(user_id)
+
+        where = " AND ".join(clauses)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT source_kind, prompt_text, reply_text, created_at
+                    FROM aria_recent_context
+                    WHERE {where}
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (*params, int(limit)),
+                )
+                rows = await cur.fetchall() or []
+
+        out = []
+        for row in reversed(rows):
+            if isinstance(row, dict):
+                out.append(row)
+            else:
+                out.append(
+                    {
+                        "source_kind": row[0],
+                        "prompt_text": row[1],
+                        "reply_text": row[2],
+                        "created_at": row[3],
+                    }
+                )
+        return out
+
     async def record_command_pattern(
         self,
         *,
@@ -592,7 +693,14 @@ class LearningEngine:
                 rows = await cur.fetchall()
         return [f"{action} ({variants} phrase variants, {hits} total hits)" for action, variants, hits in (rows or [])]
 
-    async def build_prompt_fragment(self, *, prompt: str | None = None, command_phrase: str | None = None) -> str:
+    async def build_prompt_fragment(
+        self,
+        *,
+        prompt: str | None = None,
+        command_phrase: str | None = None,
+        user_id: int | None = None,
+        guild_id: int | None = None,
+    ) -> str:
         learned_terms = await self.sample_terms(limit=10)
         command_patterns = await self.top_command_patterns(limit=5)
         repair_patterns = await self.recent_repair_patterns(limit=4)
@@ -600,7 +708,19 @@ class LearningEngine:
         similar_conversations = await self.similar_conversation_patterns(prompt or "", limit=3)
         similar_commands = await self.similar_command_patterns(command_phrase or prompt or "", limit=4)
         scoped_repair_hints = await self.action_success_hints(symptom_signature=normalize_phrase(prompt or "")[:255] if prompt else None, limit=3)
+        recent_context = await self.recent_context(user_id=user_id, guild_id=guild_id, limit=4)
         parts = []
+        if recent_context:
+            snippets = []
+            for entry in recent_context:
+                source = str(entry.get("source_kind") or "chat").replace("_", " ")
+                user_text = compact_excerpt(entry.get("prompt_text") or "", limit=140)
+                reply_text = compact_excerpt(entry.get("reply_text") or "", limit=140)
+                if reply_text:
+                    snippets.append(f"[{source}] user='{user_text}' | aria='{reply_text}'")
+                else:
+                    snippets.append(f"[{source}] user='{user_text}'")
+            parts.append("Recent same-user context to connect follow-up questions: " + "; ".join(snippets) + ".")
         if learned_terms:
             parts.append("Aria's learned vocabulary bank: " + ", ".join(learned_terms) + ".")
         if command_patterns:

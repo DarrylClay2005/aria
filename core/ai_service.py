@@ -8,8 +8,8 @@ from core.settings import GEMINI_MODEL_ID
 
 logger = logging.getLogger("discord")
 DEFAULT_TIMEOUT_SECONDS = max(20, int(os.getenv("ARIA_AI_TIMEOUT_SECONDS", "90")))
-DEFAULT_PROMPT_LIMIT = max(2048, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "12000")))
-DEFAULT_SYSTEM_LIMIT = max(1024, int(os.getenv("ARIA_AI_MAX_SYSTEM_CHARS", "8000")))
+DEFAULT_PROMPT_LIMIT = max(4096, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "60000")))
+DEFAULT_SYSTEM_LIMIT = max(2048, int(os.getenv("ARIA_AI_MAX_SYSTEM_CHARS", "12000")))
 
 
 class AIServiceUnavailable(RuntimeError):

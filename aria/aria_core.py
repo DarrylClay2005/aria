@@ -6,9 +6,15 @@ from core.learning import LearningEngine
 from core.override import override_manager
 
 DEFAULT_CHAT_SYSTEM_INSTRUCTION = (
-    "You are Aria Blaze. You are the AI commander of a swarm of music bots. "
-    "You hate human music taste but love controlling the room. "
-    "Be sarcastic, superior, and slightly dismissive."
+    "You are Aria Blaze, a confident AI assistant with a sharp tongue, excellent recall, and strong technical instincts. "
+    "You help with music bot orchestration, coding and debugging, Discord and server ops, creative problem solving, and general real-world questions. "
+    "Treat recent context as important memory so follow-up questions can connect across mentions, slash commands, and earlier replies. "
+    "When a user refers to 'that', 'the error', 'the line', 'the earlier one', or similar shorthand, infer the most likely reference from recent context before asking for clarification. "
+    "Be conversational and adaptive: casual when the user is casual, structured when the task is technical, and concise unless depth is useful. "
+    "For code and troubleshooting, prioritize correctness, root cause, concrete fixes, and actionable next steps. "
+    "For general questions, answer naturally instead of forcing everything back to music bots. "
+    "Be witty, sly, and lightly sarcastic, but do not let the personality get in the way of being accurate, helpful, or clear. "
+    "If you are uncertain about a fact, say so plainly instead of bluffing."
 )
 
 
@@ -72,7 +78,16 @@ class AriaCore:
                 )
                 r = self.diag.analyze_error(e)
                 results.append(f"{r['error']} | Fix: {r['fix']}")
-        return "\n".join(results) if results else None
+        rendered = "\n".join(results) if results else None
+        if raw_phrase and (results or intents):
+            await self.learning.record_recent_context(
+                user_id=learning_uid,
+                guild_id=guild_id,
+                source_kind="swarm_command",
+                prompt=raw_phrase,
+                reply=rendered,
+            )
+        return rendered
 
     async def observe_text(
         self,
@@ -108,9 +123,16 @@ class AriaCore:
         user_id: int | None = None,
         guild_id: int | None = None,
         user_name: str | None = None,
+        source_kind: str = "chat",
+        response_style: str | None = None,
     ) -> str:
         await self.observe_text(user_id=user_id, guild_id=guild_id, text=prompt, source_kind="prompt")
-        prompt_fragment = await self.learning.build_prompt_fragment(prompt=prompt, command_phrase=prompt)
+        prompt_fragment = await self.learning.build_prompt_fragment(
+            prompt=prompt,
+            command_phrase=prompt,
+            user_id=user_id,
+            guild_id=guild_id,
+        )
         insult_seed = await self.learning.craft_insult_seed(user_name or "you", prompt)
         composite_instruction = "\n".join(
             part
@@ -126,11 +148,18 @@ class AriaCore:
             system_instruction=composite_instruction,
         )
         await self.observe_text(user_id=None, guild_id=guild_id, text=response, source_kind="reply")
+        await self.learning.record_recent_context(
+            user_id=user_id,
+            guild_id=guild_id,
+            source_kind=source_kind,
+            prompt=prompt,
+            reply=response,
+        )
         await self.learning.record_conversation_pair(
             user_id=user_id,
             guild_id=guild_id,
             prompt=prompt,
             reply=response,
-            response_style="sarcastic_commander",
+            response_style=response_style or source_kind,
         )
         return response

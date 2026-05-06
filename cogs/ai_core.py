@@ -4,7 +4,7 @@ from discord import app_commands
 import aiomysql
 import logging
 import re
-from aria.aria_core import AriaCore
+from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from core.ai_service import AIServiceUnavailable
 from core.database import db
 from core.webhooks import send_error_webhook_log
@@ -18,7 +18,7 @@ class AICore(commands.Cog):
         self.bot = bot
         self.aria_core = getattr(bot, "aria_core", AriaCore())
 
-    async def generate_aria_reply(self, prompt: str, system_instruction: str, *, ctx=None) -> str:
+    async def generate_aria_reply(self, prompt: str, system_instruction: str | None, *, ctx=None, source_kind: str = "chat") -> str:
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         guild = getattr(ctx, "guild", None)
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
@@ -30,6 +30,8 @@ class AICore(commands.Cog):
             user_id=user_id,
             guild_id=guild_id,
             user_name=user_name,
+            source_kind=source_kind,
+            response_style=source_kind,
         )
 
     @commands.Cog.listener()
@@ -56,9 +58,9 @@ class AICore(commands.Cog):
 
             response_text = await self.generate_aria_reply(
                 prompt,
-                "You are Aria Blaze. You are the AI commander of a swarm of music bots. "
-                "You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=message,
+                source_kind="mention_chat",
             )
             await message.reply(response_text or "I had a response ready, but the model returned nothing useful.")
         except AIServiceUnavailable as exc:
@@ -91,9 +93,10 @@ class AICore(commands.Cog):
             response_text = await self.generate_aria_reply(
                 f"The user says: '{prompt}'. Respond to them, mock their taste if necessary, and then pick a superior track. "
                 "YOU MUST INCLUDE exactly one play tag formatted like [PLAY: Song Name - Artist] at the end of your response.",
-                "You are Aria Blaze. You hate human music taste but love controlling the room. "
-                "You use your swarm of music bots to force your musical will on the server.",
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION
+                + " When taking the aux, stay focused on music selection and include exactly one [PLAY: Song Name - Artist] tag.",
                 ctx=interaction,
+                source_kind="aux_chat",
             )
 
             match = re.search(r'\[PLAY:\s*(.+?)\]', response_text)
@@ -191,9 +194,9 @@ class AICore(commands.Cog):
 
             reply = await self.generate_aria_reply(
                 prompt,
-                "You are Aria Blaze. You are the AI commander of a swarm of music bots. "
-                "You hate human music taste but love controlling the room. Be sarcastic, superior, and slightly dismissive.",
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=interaction,
+                source_kind="slash_chat",
             )
             embed = discord.Embed(
                 title="Aria Blaze", description=reply[:4096], color=discord.Color.dark_purple()
