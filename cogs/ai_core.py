@@ -4,6 +4,7 @@ from discord import app_commands
 import aiomysql
 import logging
 import re
+import io
 from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from core.ai_service import AIServiceUnavailable
 from core.database import db
@@ -12,11 +13,48 @@ from core.webhooks import send_error_webhook_log
 logger = logging.getLogger("discord")
 
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
+FILE_REQUEST_RE = re.compile(r"\b(updated|fixed|corrected|patched)\s+(file|code)\b|\b(send|upload|return|give)\b.*\b(file|code|it)\b", re.IGNORECASE)
+AFFIRM_ONLY_RE = re.compile(r"^(yes|yeah|yep|sure|please do|do it|send it|upload it|return it|i would|yes please)\b", re.IGNORECASE)
 
 class AICore(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.aria_core = getattr(bot, "aria_core", AriaCore())
+
+    async def _maybe_deliver_pending_code_file(self, ctx, prompt: str):
+        actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+        if not actor:
+            return False
+        guild = getattr(ctx, "guild", None)
+        guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
+        artifact = await self.aria_core.learning.latest_file_artifact(
+            user_id=int(actor.id),
+            guild_id=guild_id,
+            require_pending=True,
+        )
+        if not artifact:
+            return False
+
+        lowered = (prompt or "").strip().lower()
+        wants_file = bool(FILE_REQUEST_RE.search(prompt or "")) or bool(AFFIRM_ONLY_RE.search(lowered))
+        if not wants_file:
+            return False
+
+        filename = artifact.get("filename") or "updated_file.txt"
+        payload = io.BytesIO(str(artifact.get("current_code") or "").encode("utf-8"))
+        discord_file = discord.File(payload, filename=f"fixed_{filename}")
+        message = "Fine. Here's the corrected file you asked for. Try not to break it again immediately."
+
+        if isinstance(ctx, discord.Message):
+            await ctx.reply(message, file=discord_file)
+        else:
+            embed = discord.Embed(title="Aria Blaze", description=message, color=discord.Color.dark_purple())
+            await ctx.followup.send(embed=embed, file=discord_file)
+
+        artifact_id = int(artifact.get("id") or 0)
+        if artifact_id:
+            await self.aria_core.learning.consume_file_offer(artifact_id=artifact_id)
+        return True
 
     async def generate_aria_reply(self, prompt: str, system_instruction: str | None, *, ctx=None, source_kind: str = "chat") -> str:
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
@@ -51,6 +89,9 @@ class AICore(commands.Cog):
             prompt = "What are you looking at?"
 
         try:
+            if await self._maybe_deliver_pending_code_file(message, prompt):
+                return
+
             control_result = await self.aria_core.handle(message, prompt)
             if control_result:
                 await message.reply(control_result)
@@ -184,6 +225,9 @@ class AICore(commands.Cog):
 
         await interaction.response.defer(thinking=True)
         try:
+            if await self._maybe_deliver_pending_code_file(interaction, prompt):
+                return
+
             control_result = await self.aria_core.handle(interaction, prompt)
             if control_result:
                 embed = discord.Embed(

@@ -502,6 +502,18 @@ class AITools(commands.Cog):
                 user_notes=self._normalize_text(snippet),
                 attach_fixed_file=attach_fixed_file,
             )
+            aria_core = getattr(self.bot, "aria_core", None)
+            if aria_core:
+                await aria_core.learning.store_file_artifact(
+                    user_id=interaction.user.id,
+                    guild_id=interaction.guild_id,
+                    source_kind="code_review",
+                    filename=filename,
+                    language_hint=language,
+                    original_code=code_text,
+                    current_code=audit_result["final_code"],
+                    offer_pending=not attach_fixed_file,
+                )
             response_text = audit_result["response_text"]
             fixed_file = None
             if attach_fixed_file:
@@ -564,6 +576,18 @@ class AITools(commands.Cog):
                 error_traceback=self._normalize_text(error_traceback),
                 attach_fixed_file=attach_fixed_file,
             )
+            aria_core = getattr(self.bot, "aria_core", None)
+            if aria_core:
+                await aria_core.learning.store_file_artifact(
+                    user_id=interaction.user.id,
+                    guild_id=interaction.guild_id,
+                    source_kind="code_debug",
+                    filename=filename,
+                    language_hint=language,
+                    original_code=code_text,
+                    current_code=audit_result["final_code"],
+                    offer_pending=not attach_fixed_file,
+                )
             response_text = audit_result["response_text"]
             fixed_file = None
             if attach_fixed_file:

@@ -170,6 +170,25 @@ class LearningEngine:
                     )
                     """
                 )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS aria_file_artifacts (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NULL,
+                        source_kind VARCHAR(32) NOT NULL DEFAULT 'code_review',
+                        filename VARCHAR(255) NULL,
+                        language_hint VARCHAR(32) NULL,
+                        original_code MEDIUMTEXT NOT NULL,
+                        current_code MEDIUMTEXT NOT NULL,
+                        offer_pending BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_file_artifacts_user_guild (user_id, guild_id, id),
+                        INDEX idx_file_artifacts_offer (user_id, guild_id, offer_pending, id)
+                    )
+                    """
+                )
 
                 await cur.execute(
                     """
@@ -476,6 +495,98 @@ class LearningEngine:
                     }
                 )
         return out
+
+    async def store_file_artifact(
+        self,
+        *,
+        user_id: int,
+        guild_id: int | None,
+        source_kind: str,
+        filename: str | None,
+        language_hint: str | None,
+        original_code: str,
+        current_code: str,
+        offer_pending: bool,
+    ) -> None:
+        if not db.pool or not user_id or not original_code or not current_code:
+            return
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO aria_file_artifacts (
+                        user_id, guild_id, source_kind, filename, language_hint,
+                        original_code, current_code, offer_pending
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user_id,
+                        guild_id,
+                        (source_kind or "code_review")[:32],
+                        (filename or "")[:255] or None,
+                        (language_hint or "")[:32] or None,
+                        original_code,
+                        current_code,
+                        bool(offer_pending),
+                    ),
+                )
+                await cur.execute(
+                    """
+                    DELETE FROM aria_file_artifacts
+                    WHERE updated_at < NOW() - INTERVAL 14 DAY
+                    """
+                )
+
+    async def latest_file_artifact(
+        self,
+        *,
+        user_id: int,
+        guild_id: int | None,
+        require_pending: bool = False,
+    ) -> dict | None:
+        if not db.pool or not user_id:
+            return None
+        clauses = ["user_id = %s"]
+        params: list[object] = [user_id]
+        if guild_id is not None:
+            clauses.append("(guild_id = %s OR guild_id IS NULL)")
+            params.append(guild_id)
+        if require_pending:
+            clauses.append("offer_pending = TRUE")
+        where = " AND ".join(clauses)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    SELECT id, source_kind, filename, language_hint, original_code, current_code, offer_pending, updated_at
+                    FROM aria_file_artifacts
+                    WHERE {where}
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                )
+                row = await cur.fetchone()
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return row
+        cols = ["id", "source_kind", "filename", "language_hint", "original_code", "current_code", "offer_pending", "updated_at"]
+        return dict(zip(cols, row, strict=False))
+
+    async def consume_file_offer(self, *, artifact_id: int) -> None:
+        if not db.pool or not artifact_id:
+            return
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE aria_file_artifacts
+                    SET offer_pending = FALSE
+                    WHERE id = %s
+                    """,
+                    (artifact_id,),
+                )
 
     async def record_command_pattern(
         self,
