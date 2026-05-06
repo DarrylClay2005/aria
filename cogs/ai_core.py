@@ -21,6 +21,52 @@ class AICore(commands.Cog):
         self.bot = bot
         self.aria_core = getattr(bot, "aria_core", AriaCore())
 
+    @staticmethod
+    def _split_text(text: str, limit: int = 1990) -> list[str]:
+        text = (text or "").strip()
+        if not text:
+            return ["I had a response ready, but the model returned nothing useful."]
+
+        chunks = []
+        remaining = text
+        while len(remaining) > limit:
+            split_at = remaining.rfind("\n", 0, limit)
+            if split_at <= 0:
+                split_at = remaining.rfind(" ", 0, limit)
+            if split_at <= 0:
+                split_at = limit
+            chunks.append(remaining[:split_at].strip())
+            remaining = remaining[split_at:].strip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
+
+    async def _reply_chunked(self, message: discord.Message, text: str):
+        chunks = self._split_text(text)
+        first_message = None
+        for index, chunk in enumerate(chunks):
+            if index == 0:
+                first_message = await message.reply(chunk)
+            else:
+                await message.channel.send(chunk, reference=first_message or message)
+
+    async def _send_followup_chunked(
+        self,
+        interaction: discord.Interaction,
+        text: str,
+        *,
+        title: str = "Aria Blaze",
+        color: discord.Color | None = None,
+    ):
+        color = color or discord.Color.dark_purple()
+        chunks = self._split_text(text, limit=4096)
+        for index, chunk in enumerate(chunks):
+            if index == 0:
+                embed = discord.Embed(title=title, description=chunk, color=color)
+            else:
+                embed = discord.Embed(description=chunk, color=color)
+            await interaction.followup.send(embed=embed)
+
     async def _maybe_deliver_pending_code_file(self, ctx, prompt: str):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         if not actor:
@@ -94,7 +140,7 @@ class AICore(commands.Cog):
 
             control_result = await self.aria_core.handle(message, prompt)
             if control_result:
-                await message.reply(control_result)
+                await self._reply_chunked(message, control_result)
                 return
 
             response_text = await self.generate_aria_reply(
@@ -103,10 +149,13 @@ class AICore(commands.Cog):
                 ctx=message,
                 source_kind="mention_chat",
             )
-            await message.reply(response_text or "I had a response ready, but the model returned nothing useful.")
+            await self._reply_chunked(
+                message,
+                response_text or "I had a response ready, but the model returned nothing useful.",
+            )
         except AIServiceUnavailable as exc:
             logger.warning("Aria mention reply unavailable: %s", exc)
-            await message.reply(exc.public_message)
+            await self._reply_chunked(message, exc.public_message)
         except Exception as e:
             logger.exception("Aria Chat Error: %s", e)
             await send_error_webhook_log("Aria Chat Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))
@@ -230,10 +279,7 @@ class AICore(commands.Cog):
 
             control_result = await self.aria_core.handle(interaction, prompt)
             if control_result:
-                embed = discord.Embed(
-                    title="Aria Blaze", description=control_result[:4096], color=discord.Color.dark_purple()
-                )
-                await interaction.followup.send(embed=embed)
+                await self._send_followup_chunked(interaction, control_result)
                 return
 
             reply = await self.generate_aria_reply(
@@ -242,10 +288,7 @@ class AICore(commands.Cog):
                 ctx=interaction,
                 source_kind="slash_chat",
             )
-            embed = discord.Embed(
-                title="Aria Blaze", description=reply[:4096], color=discord.Color.dark_purple()
-            )
-            await interaction.followup.send(embed=embed)
+            await self._send_followup_chunked(interaction, reply)
         except AIServiceUnavailable as exc:
             logger.warning("Aria command unavailable: %s", exc)
             await interaction.followup.send(exc.public_message)
