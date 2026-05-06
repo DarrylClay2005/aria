@@ -13,7 +13,9 @@ from core.database import db
 logger = logging.getLogger("discord")
 MAX_ATTACHMENT_BYTES = 200_000
 MAX_ATTACHMENT_CHARS = 50000
+MAX_AUDIT_PASSES = 5
 CODE_FENCE_RE = re.compile(r"```(?:[\w.+-]+)?\n(.*?)```", re.DOTALL)
+AUDIT_VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FIX)", re.IGNORECASE)
 
 class AITools(commands.Cog):
     def __init__(self, bot):
@@ -118,6 +120,13 @@ class AITools(commands.Cog):
             return match.group(1).strip()
         return (text or "").strip()
 
+    @staticmethod
+    def _audit_verdict(text: str) -> str:
+        match = AUDIT_VERDICT_RE.search(text or "")
+        if match:
+            return match.group(1).upper()
+        return "FIX"
+
     async def _read_code_attachment(self, attachment: discord.Attachment | None) -> tuple[str | None, str | None]:
         if attachment is None:
             return None, None
@@ -198,6 +207,145 @@ class AITools(commands.Cog):
         cleaned = self._extract_code_block(fixed_text)
         output_name = f"fixed_{filename}" if filename else f"fixed_snippet.{language if language != 'text' else 'txt'}"
         return discord.File(io.BytesIO(cleaned.encode("utf-8")), filename=output_name)
+
+    async def _run_audit_pass(
+        self,
+        interaction: discord.Interaction,
+        *,
+        system_instruction: str,
+        source_kind: str,
+        filename: str | None,
+        code_text: str,
+        language: str,
+        mode: str,
+        pass_number: int,
+        user_notes: str,
+        error_traceback: str,
+        attach_fixed_file: bool,
+    ) -> str:
+        context_bits = []
+        if error_traceback:
+            context_bits.append(f"Traceback or runtime clues:\n{error_traceback}")
+        if user_notes:
+            context_bits.append(f"User notes:\n{user_notes}")
+        context_blob = "\n\n".join(context_bits) if context_bits else "No extra context supplied."
+        prompt = (
+            f"You are on audit pass {pass_number} of {MAX_AUDIT_PASSES} for `{filename or 'snippet'}`.\n"
+            "Audit slowly and methodically. Trace execution paths mentally before making claims. "
+            "Look for syntax issues, logic bugs, invalid assumptions, broken state handling, async hazards, error handling gaps, edge cases, regressions introduced by previous fixes, API misuse, and maintainability traps.\n\n"
+            f"Mode: {mode}\n"
+            f"{context_blob}\n\n"
+            "Return a user-facing report in this exact structure:\n"
+            "VERDICT: PASS or FIX\n"
+            "OVERVIEW: one short paragraph\n"
+            "FINDINGS:\n"
+            "1. ...\n"
+            "2. ...\n"
+            "3. ...\n"
+            "FIX_FOCUS:\n"
+            "- ...\n"
+            "- ...\n"
+            "RESIDUAL_RISKS:\n"
+            "- ...\n"
+            "- ...\n\n"
+            "If the file is already solid, use VERDICT: PASS and say what you verified.\n"
+            "If the file still needs changes, use VERDICT: FIX and make the findings precise enough that another pass can repair them.\n\n"
+            f"Current file contents:\n```{language}\n{code_text}\n```"
+        )
+        return await self.ask_aria(
+            interaction,
+            prompt,
+            system_instruction=system_instruction,
+            source_kind=source_kind,
+        )
+
+    async def _iterative_audit_and_fix(
+        self,
+        interaction: discord.Interaction,
+        *,
+        system_instruction: str,
+        filename: str | None,
+        code_text: str,
+        language: str,
+        mode: str,
+        user_notes: str,
+        error_traceback: str = "",
+        attach_fixed_file: bool = False,
+    ) -> dict:
+        current_code = code_text
+        audit_reports: list[str] = []
+        final_verdict = "FIX"
+
+        for pass_number in range(1, MAX_AUDIT_PASSES + 1):
+            audit_report = await self._run_audit_pass(
+                interaction,
+                system_instruction=system_instruction,
+                source_kind=f"{mode}_audit_pass_{pass_number}",
+                filename=filename,
+                code_text=current_code,
+                language=language,
+                mode=mode,
+                pass_number=pass_number,
+                user_notes=user_notes,
+                error_traceback=error_traceback,
+                attach_fixed_file=attach_fixed_file,
+            )
+            audit_reports.append(audit_report)
+            final_verdict = self._audit_verdict(audit_report)
+            if final_verdict == "PASS":
+                break
+
+            fix_prompt = (
+                f"Apply every required fix from audit pass {pass_number} to the full file `{filename or 'snippet'}`.\n"
+                "Work carefully so you do not introduce regressions while repairing earlier problems.\n"
+                "Return only the complete corrected file contents.\n"
+                "Do not add markdown fences or explanation.\n\n"
+                f"Audit report:\n{audit_report}\n\n"
+                f"Current file:\n```{language}\n{current_code}\n```"
+            )
+            fixed_text = await self.ask_aria(
+                interaction,
+                fix_prompt,
+                system_instruction=system_instruction,
+                source_kind=f"{mode}_fix_pass_{pass_number}",
+            )
+            cleaned = self._extract_code_block(fixed_text)
+            if cleaned:
+                current_code = cleaned
+
+        final_prompt = (
+            f"You completed a multi-pass audit for `{filename or 'snippet'}` in {len(audit_reports)} pass(es).\n"
+            f"Final verdict: {final_verdict}\n"
+            f"Mode: {mode}\n"
+            "Write the final user-facing response in your normal voice.\n"
+            "Be thorough, smart, and easy to follow.\n"
+            "Include:\n"
+            "1. A short diagnosis.\n"
+            "2. The most important bugs, logic flaws, or risks you found.\n"
+            "3. What was fixed or what still needs fixing.\n"
+            "4. Any residual risks after the final pass.\n"
+        )
+        if attach_fixed_file:
+            final_prompt += "5. Mention that the full corrected file is attached.\n"
+        else:
+            final_prompt += "5. End by offering, in your own style, to upload the full corrected file if the user wants it.\n"
+        final_prompt += (
+            "\nUse the final verified code state and the audit history below.\n\n"
+            f"Audit history:\n\n" + "\n\n".join(audit_reports) + "\n\n"
+            f"Final verified file:\n```{language}\n{current_code}\n```"
+        )
+        response_text = await self.ask_aria(
+            interaction,
+            final_prompt,
+            system_instruction=system_instruction,
+            source_kind=f"{mode}_final_response",
+        )
+        return {
+            "response_text": response_text,
+            "final_code": current_code,
+            "passes": len(audit_reports),
+            "verdict": final_verdict,
+        }
 
     async def ask_aria(
         self,
@@ -340,36 +488,25 @@ class AITools(commands.Cog):
         )
 
         try:
-            code_prompt, filename, code_text, language = await self._build_code_input(
+            _code_prompt, filename, code_text, language = await self._build_code_input(
                 snippet=snippet,
                 attachment=file,
             )
-            response_text = await self.ask_aria(
+            audit_result = await self._iterative_audit_and_fix(
                 interaction,
-                (
-                    "Review this file like a senior engineer doing a deep bug hunt.\n"
-                    "Respond with:\n"
-                    "1. A short overall diagnosis of the file.\n"
-                    "2. Numbered findings ordered by severity.\n"
-                    "3. Exactly what needs to change and why.\n"
-                    "4. Corrected code or corrected sections for the most important fixes.\n"
-                    "5. If a complete corrected file is not attached in this response, end by offering in your own voice to generate and upload the full corrected file.\n\n"
-                    f"{code_prompt}"
-                ),
                 system_instruction=system_inst,
-                source_kind="code_review",
+                filename=filename,
+                code_text=code_text,
+                language=language,
+                mode="code_review",
+                user_notes=self._normalize_text(snippet),
+                attach_fixed_file=attach_fixed_file,
             )
+            response_text = audit_result["response_text"]
             fixed_file = None
             if attach_fixed_file:
-                fixed_file = await self._build_fixed_file(
-                    interaction,
-                    system_instruction=system_inst,
-                    filename=filename,
-                    code_text=code_text,
-                    language=language,
-                    request_summary=response_text[:4000],
-                    source_kind="code_review_file_fix",
-                )
+                output_name = f"fixed_{filename}" if filename else f"fixed_snippet.{language if language != 'text' else 'txt'}"
+                fixed_file = discord.File(io.BytesIO(audit_result["final_code"].encode("utf-8")), filename=output_name)
 
             chunks = self._split_text(response_text)
             for index, chunk in enumerate(chunks):
@@ -412,38 +549,26 @@ class AITools(commands.Cog):
         )
 
         try:
-            code_prompt, filename, code_text, language = await self._build_code_input(
+            _code_prompt, filename, code_text, language = await self._build_code_input(
                 snippet=snippet,
                 attachment=file,
             )
-            prompt = (
-                "Debug this file thoroughly.\n\n"
-                f"Traceback or error details:\n{self._normalize_text(error_traceback) or 'None provided. Infer likely failure points from the file and user notes.'}\n\n"
-                "Respond with:\n"
-                "1. The most likely root cause.\n"
-                "2. Any line, function, or file clues you can infer from the traceback.\n"
-                "3. What needs to change and why.\n"
-                "4. Corrected code or corrected sections for the highest-impact fixes.\n"
-                "5. If a complete corrected file is not attached in this response, end by offering in your own voice to generate and upload the full corrected file.\n\n"
-                f"{code_prompt}"
-            )
-            response_text = await self.ask_aria(
+            audit_result = await self._iterative_audit_and_fix(
                 interaction,
-                prompt,
                 system_instruction=system_inst,
-                source_kind="code_debug",
+                filename=filename,
+                code_text=code_text,
+                language=language,
+                mode="code_debug",
+                user_notes=self._normalize_text(snippet),
+                error_traceback=self._normalize_text(error_traceback),
+                attach_fixed_file=attach_fixed_file,
             )
+            response_text = audit_result["response_text"]
             fixed_file = None
             if attach_fixed_file:
-                fixed_file = await self._build_fixed_file(
-                    interaction,
-                    system_instruction=system_inst,
-                    filename=filename,
-                    code_text=code_text,
-                    language=language,
-                    request_summary=f"Error:\n{error_traceback}\n\n{response_text[:3500]}",
-                    source_kind="code_debug_file_fix",
-                )
+                output_name = f"fixed_{filename}" if filename else f"fixed_snippet.{language if language != 'text' else 'txt'}"
+                fixed_file = discord.File(io.BytesIO(audit_result["final_code"].encode("utf-8")), filename=output_name)
 
             chunks = self._split_text(response_text)
             for index, chunk in enumerate(chunks):
