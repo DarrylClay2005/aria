@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import asyncio
+import re
 from typing import Any
 
 try:
@@ -14,6 +15,8 @@ except ImportError:  # pragma: no cover
 from core.database import db
 
 logger = logging.getLogger("aria.event_bus")
+LEADING_GUILD_ID_RE = re.compile(r"^\[(\d{6,})\]")
+LAVALINK_QUERY_RE = re.compile(r"search failed for '([^']+)'", re.IGNORECASE)
 
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 BOT_SCHEMAS = {
@@ -275,6 +278,48 @@ class EventBus:
         raw = json.dumps(self._signature_payload(state), sort_keys=True, default=str)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:40]
 
+    @staticmethod
+    def _extract_embedded_guild_id(message: str | None) -> int | None:
+        match = LEADING_GUILD_ID_RE.search(str(message or "").strip())
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _error_metadata(error_type: Any, description: str | None) -> dict[str, Any]:
+        message = str(description or "").strip()
+        lowered = message.lower()
+        category = "generic_python_error"
+        summary = "A swarm bot logged an error that may need review."
+        track_query = None
+
+        if "lavalink search failed" in lowered or "failed to load tracks" in lowered:
+            category = "lavalink_search_failure"
+            summary = "Lavalink could not resolve a requested track search."
+            match = LAVALINK_QUERY_RE.search(message)
+            if match:
+                track_query = match.group(1).strip()
+        elif "voice connect error" in lowered and "timeout" in lowered:
+            category = "voice_connect_timeout"
+            summary = "The bot timed out while trying to join or restore a voice session."
+        elif "exhausted recovery retries" in lowered:
+            category = "recovery_retries_exhausted"
+            summary = "Automatic voice recovery retries were exhausted."
+        elif "status updater failed" in lowered:
+            category = "presence_update_failed"
+            summary = "The bot failed to update its Discord presence."
+        elif str(error_type or "").strip().lower() == "python_log":
+            summary = "The bot logged a Python runtime error."
+
+        return {
+            "error_category": category,
+            "error_summary": summary,
+            "track_query": track_query,
+        }
+
     async def _sync_bot_state(self, cur, drone: str) -> None:
         try:
             query = await self._playback_sync_query(cur, drone)
@@ -391,16 +436,21 @@ class EventBus:
         for row in rows:
             event_id = int(row.get("id") or 0)
             max_seen = max(max_seen, event_id)
+            description = str(row.get("description") or "")
+            embedded_guild_id = self._extract_embedded_guild_id(description)
+            guild_id = int(row.get("guild_id") or 0) or embedded_guild_id
+            metadata = self._error_metadata(row.get("error_type"), description)
             await self.emit_event(
                 event_type="bot_error_logged",
                 source_system="bot_error_table",
                 bot_name=drone,
-                guild_id=int(row.get("guild_id") or 0) or None,
+                guild_id=guild_id or None,
                 severity="error",
                 payload={
                     "error_type": row.get("error_type"),
-                    "error_message": row.get("description"),
+                    "error_message": description,
                     "created_at": str(row.get("created_at")),
+                    **metadata,
                 },
                 dedupe_key=f"boterror:{drone}:{event_id}",
             )

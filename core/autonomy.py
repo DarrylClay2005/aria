@@ -619,6 +619,15 @@ class AutonomousEngine:
         self._cooldowns[key] = now
         return True
 
+    def _ops_notice_ready(self, issue: dict[str, Any], notice_kind: str, *, cooldown_seconds: float = 180.0) -> bool:
+        key = self._cooldown_key(issue, f"ops_notice:{notice_kind}")
+        now = time.time()
+        last = self._cooldowns.get(key, 0.0)
+        if now - last < max(15.0, float(cooldown_seconds)):
+            return False
+        self._cooldowns[key] = now
+        return True
+
     def _scoped_repair_scope(self, issue: dict[str, Any]) -> str:
         drone = issue.get("drone", "swarm")
         guild_id = issue.get("guild_id", "global")
@@ -1065,10 +1074,15 @@ class AutonomousEngine:
                         await self.ensure_bot_schema(cur, drone)
                         stale_nodes = await self._fetchall(
                             cur,
-                            f"SELECT bot_name FROM {cfg['schema']}.swarm_health WHERE last_pulse < NOW() - INTERVAL 3 MINUTE",
+                            f"SELECT bot_name, TIMESTAMPDIFF(SECOND, last_pulse, NOW()) AS stale_seconds "
+                            f"FROM {cfg['schema']}.swarm_health WHERE last_pulse < NOW() - INTERVAL 3 MINUTE",
                         )
                         for row in stale_nodes or []:
-                            issues.append({"type": "stale_swarm_node", "drone": row.get("bot_name", drone)})
+                            issues.append({
+                                "type": "stale_swarm_node",
+                                "drone": row.get("bot_name", drone),
+                                "stale_seconds": int(row.get("stale_seconds") or 0),
+                            })
                     except Exception:
                         pass
                     try:
@@ -1339,7 +1353,16 @@ class AutonomousEngine:
                             await self._journal_repair(issue, result)
                             return True
                 if issue["type"] == "guild_hotspot":
-                    await send_ops_webhook_log("Aria Medic Guild Hotspot", f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.", fields=[("Bad Bots", str(issue.get('bad_bot_count', 0)), True), ("Bot Count", str(issue.get('bot_count', 0)), True), ("Issue", symptom, False)])
+                    if self._ops_notice_ready(issue, "guild_hotspot", cooldown_seconds=300):
+                        await send_ops_webhook_log(
+                            "Aria Medic Guild Hotspot",
+                            f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.",
+                            fields=[
+                                ("Bad Bots", str(issue.get('bad_bot_count', 0)), True),
+                                ("Bot Count", str(issue.get('bot_count', 0)), True),
+                                ("Why It Matters", "Multiple bots in the same guild are drifting or degraded at once.", False),
+                            ],
+                        )
                     result = RepairResult(True, "hotspot_report", "swarm", details="reported guild hotspot requiring operator attention")
                     await self._journal_repair(issue, result)
                     return True
@@ -1349,19 +1372,64 @@ class AutonomousEngine:
                     async with conn.cursor(self._dict_cursor()) as cur:
                         await self.ensure_bot_schema(cur, drone)
                         if issue["type"] == "missing_recovery_anchor":
-                            await send_ops_webhook_log("Aria Medic Alert", f"{drone} has recoverable queue state but no home/playback anchor.", fields=[("Issue", symptom, False)])
+                            if self._ops_notice_ready(issue, "missing_recovery_anchor", cooldown_seconds=300):
+                                await send_ops_webhook_log(
+                                    "Aria Medic Alert",
+                                    f"{drone} has recoverable queue state but no home or playback anchor.",
+                                    fields=[
+                                        ("Bot", str(drone), True),
+                                        ("Guild", str(issue.get('guild_id') or 'n/a'), True),
+                                        ("Why It Matters", "Aria can see recoverable queue state, but there is no stable voice channel anchor to target.", False),
+                                    ],
+                                )
                             result = RepairResult(False, "needs_manual_anchor", drone, details="queue exists but no home channel/playback channel anchor")
                         elif issue["type"] == "drone_outlier":
-                            await send_ops_webhook_log("Aria Medic Drift Alert", f"{drone} is an issue outlier in the swarm.", fields=[("Issue Count", str(issue.get('issue_count', 0)), True), ("Baseline", str(issue.get('baseline_issue_count', 0)), True), ("Issue", symptom, False)])
+                            if self._ops_notice_ready(issue, "drone_outlier", cooldown_seconds=300):
+                                await send_ops_webhook_log(
+                                    "Aria Medic Drift Alert",
+                                    f"{drone} is producing substantially more issues than the swarm baseline.",
+                                    fields=[
+                                        ("Bot", str(drone), True),
+                                        ("Issue Count", str(issue.get('issue_count', 0)), True),
+                                        ("Baseline", str(issue.get('baseline_issue_count', 0)), True),
+                                    ],
+                                )
                             result = RepairResult(True, "outlier_report", drone, details="reported comparative swarm outlier")
                         elif issue["type"] == "drone_health_outlier":
-                            await send_ops_webhook_log("Aria Medic Health Outlier", f"{drone} is underperforming versus the swarm baseline.", fields=[("Mean", str(issue.get('health_mean', 0)), True), ("Floor", str(issue.get('health_floor', 0)), True), ("Issue", symptom, False)])
+                            if self._ops_notice_ready(issue, "drone_health_outlier", cooldown_seconds=300):
+                                await send_ops_webhook_log(
+                                    "Aria Medic Health Outlier",
+                                    f"{drone} is underperforming versus the rest of the swarm.",
+                                    fields=[
+                                        ("Bot", str(drone), True),
+                                        ("Swarm Mean", str(issue.get('health_mean', 0)), True),
+                                        ("Health Floor", str(issue.get('health_floor', 0)), True),
+                                    ],
+                                )
                             result = RepairResult(True, "outlier_report", drone, details="reported health outlier versus swarm baseline")
                         elif issue["type"] == "guild_hotspot":
-                            await send_ops_webhook_log("Aria Medic Guild Hotspot", f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.", fields=[("Bad Bots", str(issue.get('bad_bot_count', 0)), True), ("Bot Count", str(issue.get('bot_count', 0)), True), ("Issue", symptom, False)])
+                            if self._ops_notice_ready(issue, "guild_hotspot", cooldown_seconds=300):
+                                await send_ops_webhook_log(
+                                    "Aria Medic Guild Hotspot",
+                                    f"Guild {issue.get('guild_id', 'n/a')} has multiple degraded swarm bots.",
+                                    fields=[
+                                        ("Bad Bots", str(issue.get('bad_bot_count', 0)), True),
+                                        ("Bot Count", str(issue.get('bot_count', 0)), True),
+                                        ("Why It Matters", "This guild is seeing a cluster of swarm issues instead of a one-off bot glitch.", False),
+                                    ],
+                                )
                             result = RepairResult(True, "hotspot_report", drone or 'swarm', details="reported guild hotspot requiring operator attention")
                         elif issue["type"] == "stale_swarm_node":
-                            await send_ops_webhook_log("Aria Medic Alert", f"Detected stale swarm node: {drone}", fields=[("Issue", symptom, False)])
+                            if self._ops_notice_ready(issue, "stale_swarm_node", cooldown_seconds=300):
+                                await send_ops_webhook_log(
+                                    "Aria Medic Alert",
+                                    f"Detected stale swarm node: {drone}",
+                                    fields=[
+                                        ("Bot", str(drone), True),
+                                        ("Stale For", f"{int(issue.get('stale_seconds') or 0)}s", True),
+                                        ("Why It Matters", "That bot's swarm heartbeat has not updated for more than three minutes.", False),
+                                    ],
+                                )
                             result = RepairResult(True, "stale_swarm_report", drone, details="reported stale swarm node")
                         else:
                             result = await self._execute_strategy(cur, issue, current_strategy)
@@ -1429,13 +1497,25 @@ class AutonomousEngine:
             }
             return await self.fix_issue(issue)
         if event_type == "bot_error_logged":
-            issue = {
-                "type": "stale_swarm_node",
-                "drone": event.get("bot_name"),
-                "guild_id": event.get("guild_id"),
-                "error_type": payload.get("error_type"),
-            }
-            return await self.fix_issue(issue)
+            category = str(payload.get("error_category") or payload.get("error_type") or "").strip().lower()
+            guild_id = event.get("guild_id")
+            if category in {"voice_connect_timeout", "recovery_retries_exhausted"} and guild_id:
+                issue = {
+                    "type": "recover_from_queue",
+                    "drone": event.get("bot_name"),
+                    "guild_id": guild_id,
+                    "current_track": payload.get("track_query"),
+                }
+                return await self.fix_issue(issue)
+            if category in {"stale_swarm_node", "heartbeat_stale"}:
+                issue = {
+                    "type": "stale_swarm_node",
+                    "drone": event.get("bot_name"),
+                    "guild_id": guild_id,
+                    "error_type": payload.get("error_type"),
+                }
+                return await self.fix_issue(issue)
+            return False
         if event_type == "health_trending_down":
             issue = {
                 "type": "predictive_stall_risk",
