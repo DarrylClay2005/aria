@@ -60,6 +60,12 @@ GEMINI_FALLBACK_MODELS = [
     for value in prefixed_env("GEMINI_FALLBACK_MODELS", os.getenv("GEMINI_FALLBACK_MODELS", "")).split(",")
     if value.strip()
 ]
+OPENAI_MODEL_ID = prefixed_env("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")).strip() or "gpt-4.1-mini"
+OPENAI_FALLBACK_MODELS = [
+    value.strip()
+    for value in prefixed_env("OPENAI_FALLBACK_MODELS", os.getenv("OPENAI_FALLBACK_MODELS", "")).split(",")
+    if value.strip()
+]
 DB_CONFIG = {
     "host": prefixed_env("DB_HOST") or os.getenv("DB_HOST") or os.getenv("MYSQL_HOST") or "host.docker.internal",
     "port": int(prefixed_env("DB_PORT") or os.getenv("DB_PORT") or os.getenv("MYSQL_PORT") or "3306"),
