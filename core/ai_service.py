@@ -80,11 +80,40 @@ class AIService:
         lowered = (message or "").lower()
         return "perday" in lowered or "per day" in lowered or "current quota" in lowered
 
-    def _rate_limit_public_message(self, *, retry_after: float | None, used_fallbacks: bool) -> str:
-        if retry_after and retry_after <= self.max_retry_delay_seconds:
+    @staticmethod
+    def _format_retry_window(seconds: float | None) -> str | None:
+        if seconds is None or seconds <= 0:
+            return None
+        rounded = max(1, int(seconds + 0.999))
+        minutes, secs = divmod(rounded, 60)
+        if minutes:
+            return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+        return f"{secs}s"
+
+    def _rate_limit_public_message(
+        self,
+        *,
+        retry_after: float | None,
+        used_fallbacks: bool,
+        daily_quota: bool = False,
+    ) -> str:
+        retry_window = self._format_retry_window(retry_after)
+        if retry_after and retry_after <= self.max_retry_delay_seconds and not daily_quota:
             return (
-                f"My AI backend hit a temporary Gemini rate limit. Give me about {int(retry_after) + 1} seconds and try again."
+                f"My AI backend hit a temporary Gemini rate limit. Give me about {retry_window} and try again."
             )
+        if daily_quota and retry_window:
+            prefix = "My Gemini daily quota is tapped out"
+            if used_fallbacks:
+                prefix = "My Gemini daily quota is tapped out across the configured models"
+            return (
+                f"{prefix}. The API says to retry in about {retry_window}, but if the free-tier daily cap is exhausted it may stay unavailable until the quota resets."
+            )
+        if retry_window:
+            prefix = "My Gemini quota is tapped out right now"
+            if used_fallbacks:
+                prefix = "My Gemini quota is tapped out across the configured models right now"
+            return f"{prefix}. The current retry window is about {retry_window}."
         if used_fallbacks:
             return (
                 "My Gemini quota is tapped out across the configured models right now. Give it a bit and try again, or increase the API quota/billing."
@@ -210,7 +239,11 @@ class AIService:
                             self._rate_limited_until = time.monotonic() + min(retry_after + 0.5, 300.0)
                         raise AIServiceUnavailable(
                             f"Gemini rate/quota limited on model {model_id}: {text}",
-                            self._rate_limit_public_message(retry_after=retry_after, used_fallbacks=used_fallbacks),
+                            self._rate_limit_public_message(
+                                retry_after=retry_after,
+                                used_fallbacks=used_fallbacks,
+                                daily_quota=is_daily_quota,
+                            ),
                         ) from exc
 
             if last_exc:
