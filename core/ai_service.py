@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from typing import Any
 
 from core.settings import GEMINI_FALLBACK_MODELS, GEMINI_MODEL_ID
 
@@ -165,9 +166,8 @@ class AIService:
         self._types = types
         return self._client, self._types
 
-    async def generate(self, prompt: str, *, system_instruction: str | None = None) -> str:
+    async def _generate_contents(self, contents: Any, *, system_instruction: str | None = None) -> str:
         client, types = self._ensure_client()
-        prompt = self._clip_text(prompt, self.prompt_limit)
         system_instruction = self._clip_text(system_instruction, self.system_limit) if system_instruction else None
 
         now = time.monotonic()
@@ -184,7 +184,7 @@ class AIService:
                 config = types.GenerateContentConfig(system_instruction=system_instruction)
             response = client.models.generate_content(
                 model=model_id,
-                contents=prompt,
+                contents=contents,
                 config=config,
             )
             return (getattr(response, "text", "") or "").strip()
@@ -262,3 +262,27 @@ class AIService:
         except Exception as exc:
             logger.exception("Gemini request failed: %s", exc)
             raise
+
+    async def generate(self, prompt: str, *, system_instruction: str | None = None) -> str:
+        prompt = self._clip_text(prompt, self.prompt_limit)
+        return await self._generate_contents(prompt, system_instruction=system_instruction)
+
+    async def generate_with_attachment(
+        self,
+        prompt: str,
+        *,
+        attachment_bytes: bytes,
+        attachment_mime_type: str,
+        attachment_name: str,
+        system_instruction: str | None = None,
+    ) -> str:
+        _client, types = self._ensure_client()
+        prompt = self._clip_text(prompt, self.prompt_limit)
+        attachment_label = (attachment_name or "attachment").strip()[:180]
+        mime_type = (attachment_mime_type or "application/octet-stream").strip().lower()
+        attachment_intro = f"Attachment provided by the user: `{attachment_label}` ({mime_type}). Use it as direct context for the reply."
+        contents = [
+            types.Part.from_text(text=f"{attachment_intro}\n\nUser prompt:\n{prompt}"),
+            types.Part.from_bytes(data=attachment_bytes, mime_type=mime_type),
+        ]
+        return await self._generate_contents(contents, system_instruction=system_instruction)

@@ -289,15 +289,22 @@ class AriaCore:
         user_name: str | None = None,
         source_kind: str = "chat",
         response_style: str | None = None,
+        attachment_bytes: bytes | None = None,
+        attachment_name: str | None = None,
+        attachment_mime_type: str | None = None,
+        attachment_context_note: str | None = None,
     ) -> str:
-        await self.observe_text(user_id=user_id, guild_id=guild_id, text=prompt, source_kind="prompt")
+        prompt_for_memory = prompt
+        if attachment_context_note:
+            prompt_for_memory = f"{prompt}\n\n[Attachment context: {attachment_context_note}]"
+        await self.observe_text(user_id=user_id, guild_id=guild_id, text=prompt_for_memory, source_kind="prompt")
         prompt_fragment = await self.learning.build_prompt_fragment(
-            prompt=prompt,
-            command_phrase=prompt,
+            prompt=prompt_for_memory,
+            command_phrase=prompt_for_memory,
             user_id=user_id,
             guild_id=guild_id,
         )
-        insult_seed = await self.learning.craft_insult_seed(user_name or "you", prompt)
+        insult_seed = await self.learning.craft_insult_seed(user_name or "you", prompt_for_memory)
         composite_instruction = "\n".join(
             part
             for part in (
@@ -307,22 +314,31 @@ class AriaCore:
             )
             if part
         )
-        response = await self.ai.generate(
-            prompt,
-            system_instruction=composite_instruction,
-        )
+        if attachment_bytes and attachment_mime_type:
+            response = await self.ai.generate_with_attachment(
+                prompt,
+                attachment_bytes=attachment_bytes,
+                attachment_mime_type=attachment_mime_type,
+                attachment_name=attachment_name or "attachment",
+                system_instruction=composite_instruction,
+            )
+        else:
+            response = await self.ai.generate(
+                prompt,
+                system_instruction=composite_instruction,
+            )
         await self.observe_text(user_id=None, guild_id=guild_id, text=response, source_kind="reply")
         await self.learning.record_recent_context(
             user_id=user_id,
             guild_id=guild_id,
             source_kind=source_kind,
-            prompt=prompt,
+            prompt=prompt_for_memory,
             reply=response,
         )
         await self.learning.record_conversation_pair(
             user_id=user_id,
             guild_id=guild_id,
-            prompt=prompt,
+            prompt=prompt_for_memory,
             reply=response,
             response_style=response_style or source_kind,
         )

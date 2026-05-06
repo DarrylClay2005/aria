@@ -5,6 +5,7 @@ import aiomysql
 import logging
 import re
 import io
+import os
 from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from core.ai_service import AIServiceUnavailable
 from core.database import db
@@ -15,6 +16,15 @@ logger = logging.getLogger("discord")
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 FILE_REQUEST_RE = re.compile(r"\b(updated|fixed|corrected|patched)\s+(file|code)\b|\b(send|upload|return|give)\b.*\b(file|code|it)\b", re.IGNORECASE)
 AFFIRM_ONLY_RE = re.compile(r"^(yes|yeah|yep|sure|please do|do it|send it|upload it|return it|i would|yes please)\b", re.IGNORECASE)
+TEXT_MIME_PREFIXES = ("text/",)
+TEXT_MIME_EXACT = {
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+}
+MAX_CHAT_ATTACHMENT_BYTES = max(100_000, int(os.getenv("ARIA_CHAT_ATTACHMENT_MAX_BYTES", "6000000") or "6000000"))
 
 class AICore(commands.Cog):
     def __init__(self, bot):
@@ -67,6 +77,77 @@ class AICore(commands.Cog):
                 embed = discord.Embed(description=chunk, color=color)
             await interaction.followup.send(embed=embed)
 
+    @staticmethod
+    def _looks_text_like(attachment: discord.Attachment) -> bool:
+        content_type = (attachment.content_type or "").lower()
+        if any(content_type.startswith(prefix) for prefix in TEXT_MIME_PREFIXES):
+            return True
+        if content_type in TEXT_MIME_EXACT:
+            return True
+        filename = (attachment.filename or "").lower()
+        return filename.endswith(
+            (
+                ".txt",
+                ".md",
+                ".py",
+                ".js",
+                ".ts",
+                ".tsx",
+                ".jsx",
+                ".json",
+                ".yaml",
+                ".yml",
+                ".toml",
+                ".ini",
+                ".cfg",
+                ".conf",
+                ".log",
+                ".csv",
+                ".html",
+                ".css",
+                ".xml",
+            )
+        )
+
+    async def _prepare_chat_attachment(
+        self,
+        attachment: discord.Attachment | None,
+    ) -> tuple[bytes | None, str | None, str | None, str | None]:
+        if attachment is None:
+            return None, None, None, None
+        if attachment.size > MAX_CHAT_ATTACHMENT_BYTES:
+            raise ValueError(
+                f"`{attachment.filename}` is too large for `/aria` context here. Keep it under {MAX_CHAT_ATTACHMENT_BYTES // 1000} KB."
+            )
+        payload = await attachment.read()
+        if not payload:
+            raise ValueError(f"`{attachment.filename}` was empty.")
+
+        content_type = (attachment.content_type or "").strip().lower()
+        if content_type.startswith("image/"):
+            note = f"image attachment `{attachment.filename}`"
+            return payload, content_type, attachment.filename, note
+
+        if self._looks_text_like(attachment):
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    text = payload.decode("latin-1")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"`{attachment.filename}` could not be decoded as readable text.") from exc
+            cleaned = text.strip()
+            if not cleaned:
+                raise ValueError(f"`{attachment.filename}` was empty.")
+            if len(cleaned) > 12000:
+                cleaned = cleaned[:11950].rstrip() + "\n\n[Attachment truncated for chat context]"
+            note = f"text attachment `{attachment.filename}`"
+            return cleaned.encode("utf-8"), "text/plain", attachment.filename, note
+
+        raise ValueError(
+            f"`{attachment.filename}` is not a supported `/aria` context file yet. Send an image or a readable text file."
+        )
+
     async def _maybe_deliver_pending_code_file(self, ctx, prompt: str):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         if not actor:
@@ -102,7 +183,18 @@ class AICore(commands.Cog):
             await self.aria_core.learning.consume_file_offer(artifact_id=artifact_id)
         return True
 
-    async def generate_aria_reply(self, prompt: str, system_instruction: str | None, *, ctx=None, source_kind: str = "chat") -> str:
+    async def generate_aria_reply(
+        self,
+        prompt: str,
+        system_instruction: str | None,
+        *,
+        ctx=None,
+        source_kind: str = "chat",
+        attachment_bytes: bytes | None = None,
+        attachment_name: str | None = None,
+        attachment_mime_type: str | None = None,
+        attachment_context_note: str | None = None,
+    ) -> str:
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         guild = getattr(ctx, "guild", None)
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
@@ -116,6 +208,10 @@ class AICore(commands.Cog):
             user_name=user_name,
             source_kind=source_kind,
             response_style=source_kind,
+            attachment_bytes=attachment_bytes,
+            attachment_name=attachment_name,
+            attachment_mime_type=attachment_mime_type,
+            attachment_context_note=attachment_context_note,
         )
 
     @commands.Cog.listener()
@@ -264,8 +360,11 @@ class AICore(commands.Cog):
             )
 
     @app_commands.command(name="aria", description="Chat with Aria directly without mentioning her in the channel.")
-    @app_commands.describe(prompt="What you want to say or ask Aria")
-    async def aria(self, interaction: discord.Interaction, prompt: str):
+    @app_commands.describe(
+        prompt="What you want to say or ask Aria",
+        file="Optional screenshot or readable file for extra context",
+    )
+    async def aria(self, interaction: discord.Interaction, prompt: str, file: discord.Attachment | None = None):
         prompt = prompt.strip()
         if not prompt:
             return await interaction.response.send_message(
@@ -282,13 +381,31 @@ class AICore(commands.Cog):
                 await self._send_followup_chunked(interaction, control_result)
                 return
 
+            attachment_bytes = None
+            attachment_mime_type = None
+            attachment_name = None
+            attachment_context_note = None
+            if file is not None:
+                (
+                    attachment_bytes,
+                    attachment_mime_type,
+                    attachment_name,
+                    attachment_context_note,
+                ) = await self._prepare_chat_attachment(file)
+
             reply = await self.generate_aria_reply(
                 prompt,
                 DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=interaction,
                 source_kind="slash_chat",
+                attachment_bytes=attachment_bytes,
+                attachment_name=attachment_name,
+                attachment_mime_type=attachment_mime_type,
+                attachment_context_note=attachment_context_note,
             )
             await self._send_followup_chunked(interaction, reply)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
         except AIServiceUnavailable as exc:
             logger.warning("Aria command unavailable: %s", exc)
             await interaction.followup.send(exc.public_message)
