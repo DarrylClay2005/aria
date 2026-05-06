@@ -60,6 +60,18 @@ GEMINI_FALLBACK_MODELS = [
     for value in prefixed_env("GEMINI_FALLBACK_MODELS", os.getenv("GEMINI_FALLBACK_MODELS", "")).split(",")
     if value.strip()
 ]
+GROQ_MODEL_ID = (
+    prefixed_env(
+        "GROQ_MODEL",
+        os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+    ).strip()
+    or "meta-llama/llama-4-scout-17b-16e-instruct"
+)
+GROQ_FALLBACK_MODELS = [
+    value.strip()
+    for value in prefixed_env("GROQ_FALLBACK_MODELS", os.getenv("GROQ_FALLBACK_MODELS", "")).split(",")
+    if value.strip()
+]
 OPENAI_MODEL_ID = prefixed_env("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")).strip() or "gpt-4.1-mini"
 OPENAI_FALLBACK_MODELS = [
     value.strip()

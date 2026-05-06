@@ -11,6 +11,8 @@ from typing import Any
 from core.settings import (
     GEMINI_FALLBACK_MODELS,
     GEMINI_MODEL_ID,
+    GROQ_FALLBACK_MODELS,
+    GROQ_MODEL_ID,
     OPENAI_FALLBACK_MODELS,
     OPENAI_MODEL_ID,
 )
@@ -43,6 +45,10 @@ class AIService:
         fallback_models: list[str] | None = None,
         retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
         max_retry_delay_seconds: float = DEFAULT_MAX_RETRY_DELAY_SECONDS,
+        groq_model_id: str | None = None,
+        groq_api_key: str | None = None,
+        groq_fallback_models: list[str] | None = None,
+        enable_groq_fallback: bool | None = None,
         openai_model_id: str | None = None,
         openai_api_key: str | None = None,
         openai_fallback_models: list[str] | None = None,
@@ -56,6 +62,23 @@ class AIService:
             or os.getenv("ARIA_GEMINI_API_KEY", "")
             or os.getenv("GEMINI_API_KEY", "")
         ).strip()
+
+        self.groq_model_id = (groq_model_id or GROQ_MODEL_ID).strip() or "meta-llama/llama-4-scout-17b-16e-instruct"
+        configured_groq_fallbacks = groq_fallback_models if groq_fallback_models is not None else GROQ_FALLBACK_MODELS
+        self.groq_fallback_models = self._dedupe_models(self.groq_model_id, configured_groq_fallbacks)
+        self.groq_api_key = (
+            groq_api_key
+            or os.getenv("ARIA_GROQ_API_KEY", "")
+            or os.getenv("GROQ_API_KEY", "")
+        ).strip()
+        if enable_groq_fallback is None:
+            env_value = str(os.getenv("ARIA_ENABLE_GROQ_FALLBACK", "") or "").strip().lower()
+            if env_value:
+                self.enable_groq_fallback = env_value in {"1", "true", "yes", "on"}
+            else:
+                self.enable_groq_fallback = bool(self.groq_api_key)
+        else:
+            self.enable_groq_fallback = bool(enable_groq_fallback)
 
         self.openai_model_id = (openai_model_id or OPENAI_MODEL_ID).strip() or "gpt-4.1-mini"
         configured_openai_fallbacks = (
@@ -85,6 +108,7 @@ class AIService:
 
         self._gemini_client = None
         self._gemini_types = None
+        self._groq_client = None
         self._openai_client = None
         self._rate_limited_until = 0.0
 
@@ -187,7 +211,7 @@ class AIService:
 
     def _fallback_failure_public_message(self) -> str:
         return (
-            "My primary AI backend is overloaded right now, and the OpenAI fallback could not take over cleanly. Give it a minute and try again."
+            "My primary AI backend is overloaded right now, and the backup routes could not take over cleanly. Give it a minute and try again."
         )
 
     @staticmethod
@@ -201,11 +225,14 @@ class AIService:
     def _has_openai_fallback(self) -> bool:
         return self.enable_openai_fallback and bool(self.openai_api_key)
 
+    def _has_groq_fallback(self) -> bool:
+        return self.enable_groq_fallback and bool(self.groq_api_key)
+
     def _ensure_gemini_client(self):
         if not self.api_key:
             raise AIServiceUnavailable(
                 "GEMINI_API_KEY is not configured.",
-                "My Gemini backend is not configured yet. Add `GEMINI_API_KEY` or enable the OpenAI fallback.",
+                "My Gemini backend is not configured yet. Add `GEMINI_API_KEY` or enable a Groq/OpenAI fallback.",
             )
 
         if self._gemini_client is not None and self._gemini_types is not None:
@@ -223,6 +250,30 @@ class AIService:
         self._gemini_client = genai.Client(api_key=self.api_key)
         self._gemini_types = types
         return self._gemini_client, self._gemini_types
+
+    def _ensure_groq_client(self):
+        if not self.groq_api_key:
+            raise AIServiceUnavailable(
+                "GROQ_API_KEY is not configured.",
+                "My Groq fallback is not configured yet. Add `GROQ_API_KEY` or `ARIA_GROQ_API_KEY` to use it.",
+            )
+
+        if self._groq_client is not None:
+            return self._groq_client
+
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise AIServiceUnavailable(
+                "openai is not installed.",
+                "My Groq fallback package is missing on this host, so that backup path cannot boot yet.",
+            ) from exc
+
+        self._groq_client = OpenAI(
+            api_key=self.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+        return self._groq_client
 
     def _ensure_openai_client(self):
         if not self.openai_api_key:
@@ -414,16 +465,21 @@ class AIService:
                         return candidate
         return ""
 
-    async def _generate_openai_response(
+    async def _generate_openai_compatible_response(
         self,
         *,
+        provider_label: str,
+        provider_not_available_message: str,
+        ensure_client,
+        primary_model_id: str,
+        fallback_models: list[str] | None,
         prompt: str,
         system_instruction: str | None = None,
         attachment_bytes: bytes | None = None,
         attachment_mime_type: str | None = None,
         attachment_name: str | None = None,
     ) -> str:
-        client = self._ensure_openai_client()
+        client = ensure_client()
         prompt = self._clip_text(prompt, self.prompt_limit)
         input_payload = self._build_openai_input(
             prompt=prompt,
@@ -440,7 +496,7 @@ class AIService:
             )
             return self._extract_openai_output_text(response)
 
-        models = [self.openai_model_id, *self.openai_fallback_models]
+        models = [primary_model_id, *(fallback_models or [])]
         last_exc: Exception | None = None
         for model_index, model_id in enumerate(models):
             try:
@@ -450,8 +506,8 @@ class AIService:
                 )
             except TimeoutError as exc:
                 raise AIServiceUnavailable(
-                    "OpenAI fallback request timed out.",
-                    "My OpenAI fallback timed out on that request. Try again in a moment.",
+                    f"{provider_label} request timed out.",
+                    f"My {provider_label} timed out on that request. Try again in a moment.",
                 ) from exc
             except Exception as exc:
                 last_exc = exc
@@ -459,28 +515,73 @@ class AIService:
                 has_next_model = model_index < len(models) - 1
                 if (self._is_rate_limited_error(text) or self._is_service_unavailable_error(text)) and has_next_model:
                     logger.warning(
-                        "OpenAI model %s failed with a temporary backend issue; trying fallback model %s.",
+                        "%s model %s failed with a temporary backend issue; trying fallback model %s.",
+                        provider_label,
                         model_id,
                         models[model_index + 1],
                     )
                     continue
                 if self._is_rate_limited_error(text):
                     raise AIServiceUnavailable(
-                        f"OpenAI fallback rate/quota limited on model {model_id}: {text}",
-                        "My OpenAI fallback is rate-limited right now too. Give it a bit and try again.",
+                        f"{provider_label} rate/quota limited on model {model_id}: {text}",
+                        f"My {provider_label} is rate-limited right now too. Give it a bit and try again.",
                     ) from exc
                 if self._is_service_unavailable_error(text):
                     raise AIServiceUnavailable(
-                        f"OpenAI fallback temporarily unavailable on model {model_id}: {text}",
-                        self._service_unavailable_public_message("OpenAI fallback"),
+                        f"{provider_label} temporarily unavailable on model {model_id}: {text}",
+                        self._service_unavailable_public_message(provider_label, backup_attempted=True),
                     ) from exc
-                logger.exception("OpenAI fallback request failed: %s", exc)
+                logger.exception("%s request failed: %s", provider_label, exc)
                 raise
 
         raise AIServiceUnavailable(
-            f"OpenAI fallback exhausted configured models: {last_exc}",
-            self._service_unavailable_public_message("OpenAI fallback"),
+            f"{provider_label} exhausted configured models: {last_exc}",
+            provider_not_available_message,
         ) from last_exc
+
+    async def _generate_groq_response(
+        self,
+        *,
+        prompt: str,
+        system_instruction: str | None = None,
+        attachment_bytes: bytes | None = None,
+        attachment_mime_type: str | None = None,
+        attachment_name: str | None = None,
+    ) -> str:
+        return await self._generate_openai_compatible_response(
+            provider_label="Groq fallback",
+            provider_not_available_message=self._service_unavailable_public_message("Groq fallback"),
+            ensure_client=self._ensure_groq_client,
+            primary_model_id=self.groq_model_id,
+            fallback_models=self.groq_fallback_models,
+            prompt=prompt,
+            system_instruction=system_instruction,
+            attachment_bytes=attachment_bytes,
+            attachment_mime_type=attachment_mime_type,
+            attachment_name=attachment_name,
+        )
+
+    async def _generate_openai_response(
+        self,
+        *,
+        prompt: str,
+        system_instruction: str | None = None,
+        attachment_bytes: bytes | None = None,
+        attachment_mime_type: str | None = None,
+        attachment_name: str | None = None,
+    ) -> str:
+        return await self._generate_openai_compatible_response(
+            provider_label="OpenAI fallback",
+            provider_not_available_message=self._service_unavailable_public_message("OpenAI fallback"),
+            ensure_client=self._ensure_openai_client,
+            primary_model_id=self.openai_model_id,
+            fallback_models=self.openai_fallback_models,
+            prompt=prompt,
+            system_instruction=system_instruction,
+            attachment_bytes=attachment_bytes,
+            attachment_mime_type=attachment_mime_type,
+            attachment_name=attachment_name,
+        )
 
     async def _generate_with_fallback(
         self,
@@ -492,6 +593,7 @@ class AIService:
         attachment_name: str | None = None,
     ) -> str:
         gemini_unavailable: AIServiceUnavailable | None = None
+        backup_failures: list[tuple[str, AIServiceUnavailable]] = []
 
         if self.api_key:
             try:
@@ -511,30 +613,52 @@ class AIService:
                 return await self._generate_gemini_contents(contents, system_instruction=system_instruction)
             except AIServiceUnavailable as exc:
                 gemini_unavailable = exc
-                if not self._has_openai_fallback():
+                if not self._has_groq_fallback() and not self._has_openai_fallback():
                     raise
-                logger.warning("Gemini path unavailable; attempting OpenAI fallback: %s", exc)
-        elif not self._has_openai_fallback():
+                logger.warning("Gemini path unavailable; attempting configured backup providers: %s", exc)
+        elif not self._has_groq_fallback() and not self._has_openai_fallback():
             raise AIServiceUnavailable(
                 "No AI provider is configured.",
-                "No AI backend is configured right now. Add `GEMINI_API_KEY` or `OPENAI_API_KEY` and try again.",
+                "No AI backend is configured right now. Add `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` and try again.",
             )
 
-        try:
-            return await self._generate_openai_response(
-                prompt=prompt,
-                system_instruction=system_instruction,
-                attachment_bytes=attachment_bytes,
-                attachment_mime_type=attachment_mime_type,
-                attachment_name=attachment_name,
-            )
-        except AIServiceUnavailable as fallback_exc:
-            if gemini_unavailable is not None:
-                raise AIServiceUnavailable(
-                    f"Gemini failed first ({gemini_unavailable}); OpenAI fallback also failed ({fallback_exc}).",
-                    self._fallback_failure_public_message(),
-                ) from fallback_exc
-            raise
+        backup_providers: list[tuple[str, Any]] = []
+        if self._has_groq_fallback():
+            backup_providers.append(("Groq fallback", self._generate_groq_response))
+        if self._has_openai_fallback():
+            backup_providers.append(("OpenAI fallback", self._generate_openai_response))
+
+        for provider_label, provider_handler in backup_providers:
+            try:
+                return await provider_handler(
+                    prompt=prompt,
+                    system_instruction=system_instruction,
+                    attachment_bytes=attachment_bytes,
+                    attachment_mime_type=attachment_mime_type,
+                    attachment_name=attachment_name,
+                )
+            except AIServiceUnavailable as fallback_exc:
+                backup_failures.append((provider_label, fallback_exc))
+                if provider_label != backup_providers[-1][0]:
+                    logger.warning("%s failed; trying the next backup provider: %s", provider_label, fallback_exc)
+                    continue
+                if gemini_unavailable is not None:
+                    failure_summary = "; ".join(
+                        f"{label} failed ({failure})" for label, failure in backup_failures
+                    )
+                    raise AIServiceUnavailable(
+                        f"Gemini failed first ({gemini_unavailable}); {failure_summary}.",
+                        self._fallback_failure_public_message(),
+                    ) from fallback_exc
+                raise
+
+        if gemini_unavailable is not None and backup_failures:
+            failure_summary = "; ".join(f"{label} failed ({failure})" for label, failure in backup_failures)
+            raise AIServiceUnavailable(
+                f"Gemini failed first ({gemini_unavailable}); {failure_summary}.",
+                self._fallback_failure_public_message(),
+            ) from backup_failures[-1][1]
+        raise AIServiceUnavailable("No AI provider returned a usable response.")
 
     async def generate(self, prompt: str, *, system_instruction: str | None = None) -> str:
         return await self._generate_with_fallback(

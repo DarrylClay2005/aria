@@ -17,6 +17,22 @@ def test_ai_service_falls_back_to_legacy_api_key(monkeypatch):
     assert service.api_key == "legacy-key"
 
 
+def test_ai_service_prefers_prefixed_groq_api_key(monkeypatch):
+    monkeypatch.setenv("ARIA_GROQ_API_KEY", "prefixed-groq-key")
+    monkeypatch.setenv("GROQ_API_KEY", "legacy-groq-key")
+    service = AIService()
+    assert service.groq_api_key == "prefixed-groq-key"
+    assert service.enable_groq_fallback is True
+
+
+def test_ai_service_falls_back_to_legacy_groq_api_key(monkeypatch):
+    monkeypatch.delenv("ARIA_GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "legacy-groq-key")
+    service = AIService()
+    assert service.groq_api_key == "legacy-groq-key"
+    assert service.enable_groq_fallback is True
+
+
 def test_repo_no_longer_contains_hardcoded_gemini_fallback_key():
     sentinel = "AIza" + "SyBe-PsYYalYB4Tum-vCmqj-N9m6MsfTL2k"
     offenders = []
