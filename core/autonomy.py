@@ -71,12 +71,12 @@ class AutonomousEngine:
         self._recover_guard_seconds = max(60, int(os.getenv('ARIA_RECOVERY_GUARD_SECONDS', '300') or '300'))
         self._queue_rebuild_guard_seconds = max(30, int(os.getenv('ARIA_QUEUE_REBUILD_GUARD_SECONDS', '180') or '180'))
         self._state_normalize_guard_seconds = max(30, int(os.getenv('ARIA_STATE_GUARD_SECONDS', '120') or '120'))
-        self._state_recovery_min_age_seconds = max(45, int(os.getenv('ARIA_RECOVERY_MIN_AGE_SECONDS', '120') or '120'))
+        self._state_recovery_min_age_seconds = max(45, int(os.getenv('ARIA_RECOVERY_MIN_AGE_SECONDS', '60') or '60'))
         self._playback_drift_min_age_seconds = max(30, int(os.getenv('ARIA_PLAYBACK_DRIFT_MIN_AGE_SECONDS', '90') or '90'))
         self._predictive_queue_rebalance_min_delta = max(5, int(os.getenv('ARIA_PREDICTIVE_QUEUE_DRIFT_MIN_DELTA', '8') or '8'))
         self._event_auto_recovery_max_age_seconds = max(20, int(os.getenv('ARIA_EVENT_AUTO_RECOVERY_MAX_AGE_SECONDS', '180') or '180'))
         self._voice_timeout_pause_seconds = max(90, int(os.getenv('ARIA_VOICE_TIMEOUT_PAUSE_SECONDS', '240') or '240'))
-        self._retry_exhausted_pause_seconds = max(self._voice_timeout_pause_seconds, int(os.getenv('ARIA_RETRY_EXHAUSTED_PAUSE_SECONDS', '900') or '900'))
+        self._retry_exhausted_pause_seconds = max(90, int(os.getenv('ARIA_RETRY_EXHAUSTED_PAUSE_SECONDS', '180') or '180'))
         self._infra_timeout_seconds = max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45'))
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -1366,8 +1366,8 @@ class AutonomousEngine:
         guild_id = issue["guild_id"]
         cfg = BOT_SCHEMAS[drone]
         playback = await self._fetch_playback_row(cur, drone, guild_id)
-        vc_id = issue.get("home_vc_id") or (playback or {}).get("channel_id")
-        text_channel_id = (playback or {}).get("text_channel_id")
+        vc_id = issue.get("home_vc_id") or issue.get("channel_id") or (playback or {}).get("channel_id")
+        text_channel_id = issue.get("text_channel_id") or (playback or {}).get("text_channel_id")
         if not vc_id:
             return RepairResult(False, "recover", drone, "no home or playback channel available")
         await self._enqueue_direct_order(cur, drone, guild_id, "RECOVER", vc_id=vc_id, text_channel_id=text_channel_id, data="aria_auto_recovery")
@@ -1647,6 +1647,7 @@ class AutonomousEngine:
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
                 "channel_id": payload.get("channel_id"),
+                "text_channel_id": payload.get("text_channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),
@@ -1667,6 +1668,7 @@ class AutonomousEngine:
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
                 "channel_id": payload.get("channel_id"),
+                "text_channel_id": payload.get("text_channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),
@@ -1715,6 +1717,7 @@ class AutonomousEngine:
                 "drone": event.get("bot_name"),
                 "guild_id": event.get("guild_id"),
                 "channel_id": payload.get("channel_id"),
+                "text_channel_id": payload.get("text_channel_id"),
                 "home_vc_id": payload.get("home_vc_id"),
                 "queue_count": payload.get("queue_count", 0),
                 "backup_count": payload.get("backup_count", 0),

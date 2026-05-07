@@ -291,7 +291,7 @@ class AICore(commands.Cog):
             if match:
                 song_query = match.group(1).strip()
                 response_text = response_text.replace(match.group(0), "").strip()
-                search_url = f"ytsearch1:{song_query}"
+                search_url = f"ytmsearch:{song_query}"
 
                 async with db.pool.acquire() as conn:
                     async with conn.cursor(aiomysql.DictCursor) as cur:

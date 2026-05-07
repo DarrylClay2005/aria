@@ -25,6 +25,7 @@ FILTER_ALIASES = {
 }
 LOOP_ALIASES = {"off": "off", "song": "song", "queue": "queue"}
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
+LAVALINK_QUERY_PREFIX_RE = re.compile(r"^[a-z0-9_]+search\d*:", re.IGNORECASE)
 GUILD_SETTINGS_COLUMNS = (
     ("home_vc_id", "BIGINT"),
     ("volume", "INT DEFAULT 100"),
@@ -207,9 +208,9 @@ class SwarmController:
         cleaned = (query or "").strip()
         if not cleaned:
             return ""
-        if cleaned.startswith(("http://", "https://", "ytsearch")):
+        if cleaned.startswith(("http://", "https://")) or LAVALINK_QUERY_PREFIX_RE.match(cleaned):
             return cleaned
-        return f"ytsearch1:{cleaned}"
+        return f"ytmsearch:{cleaned}"
 
     async def play(self, ctx, query: str, *, drone: str | None = None) -> str:
         guild_id = guild_id_from_ctx(ctx)

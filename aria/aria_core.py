@@ -1,8 +1,8 @@
 import re
 from copy import deepcopy
+from datetime import datetime
 
 from core.intent_parser import IntentParser
-from core.diagnostics import DiagnosticsEngine
 from core.commands import router
 from core.ai_service import AIService
 from core.learning import LearningEngine
@@ -36,6 +36,21 @@ ORDINAL_MAP = {
     "fourth": 3,
     "four": 3,
 }
+
+
+class DiagnosticsEngine:
+    def analyze_error(self, error):
+        message = str(error).lower()
+        fix = "Unknown"
+        if "voice" in message:
+            fix = "Reconnect VC"
+        elif "timeout" in message:
+            fix = "Retry request"
+        return {
+            "time": str(datetime.utcnow()),
+            "error": str(error),
+            "fix": fix,
+        }
 
 
 class AriaCore:

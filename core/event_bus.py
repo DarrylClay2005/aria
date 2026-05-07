@@ -40,7 +40,7 @@ class EventBus:
         self._claim_lock = asyncio.Lock()
         self._recovery_event_min_age_seconds = max(
             45.0,
-            float(os.getenv("ARIA_RECOVERY_EVENT_MIN_AGE_SECONDS", "120") or "120"),
+            float(os.getenv("ARIA_RECOVERY_EVENT_MIN_AGE_SECONDS", "60") or "60"),
         )
         self._playback_drift_min_age_seconds = max(
             30.0,
@@ -368,6 +368,14 @@ class EventBus:
             updated_seconds = 0.0
         return updated_seconds >= self._playback_drift_min_age_seconds
 
+    @staticmethod
+    def _age_bucket(updated_seconds: Any, *, bucket_seconds: int = 300) -> int:
+        try:
+            age = max(0.0, float(updated_seconds or 0))
+        except Exception:
+            age = 0.0
+        return int(age // max(30, bucket_seconds))
+
     async def _sync_bot_state(self, cur, drone: str) -> None:
         try:
             query = await self._playback_sync_query(cur, drone)
@@ -436,6 +444,7 @@ class EventBus:
                         payload={**state, "health_score": score, "status_label": label, "recent_health": vals[:4]},
                         dedupe_key=f"healthtrend:{drone}:{guild_id}:{signature}",
                     )
+            payload = {**state, "health_score": score, "status_label": label}
             if signature != previous_signature:
                 await self.emit_event(
                     event_type="bot_state_changed",
@@ -443,30 +452,30 @@ class EventBus:
                     bot_name=drone,
                     guild_id=guild_id,
                     severity="info",
-                    payload={**state, "health_score": score, "status_label": label},
+                    payload=payload,
                     dedupe_key=f"evt:{drone}:{guild_id}:{signature}",
                 )
-                if self._should_emit_recoverable_state(state):
-                    await self.emit_event(
-                        event_type="recoverable_state_detected",
-                        source_system="swarm_state",
-                        bot_name=drone,
-                        guild_id=guild_id,
-                        severity="warning",
-                        payload={**state, "health_score": score, "status_label": label},
-                        dedupe_key=f"recoverable:{drone}:{guild_id}:{signature}",
-                    )
-                elif self._should_emit_playback_drift(state):
-                    await self.emit_event(
-                        event_type="playback_state_drift",
-                        source_system="swarm_state",
-                        bot_name=drone,
-                        guild_id=guild_id,
-                        severity="warning",
-                        payload={**state, "health_score": score, "status_label": label},
-                        dedupe_key=f"drift:{drone}:{guild_id}:{signature}",
-                    )
                 await self._set_cursor(cur, cursor_key, signature)
+            if self._should_emit_recoverable_state(state):
+                await self.emit_event(
+                    event_type="recoverable_state_detected",
+                    source_system="swarm_state",
+                    bot_name=drone,
+                    guild_id=guild_id,
+                    severity="warning",
+                    payload=payload,
+                    dedupe_key=f"recoverable:{drone}:{guild_id}:{signature}:age{self._age_bucket(state.get('updated_seconds'))}",
+                )
+            elif self._should_emit_playback_drift(state):
+                await self.emit_event(
+                    event_type="playback_state_drift",
+                    source_system="swarm_state",
+                    bot_name=drone,
+                    guild_id=guild_id,
+                    severity="warning",
+                    payload=payload,
+                    dedupe_key=f"drift:{drone}:{guild_id}:{signature}:age{self._age_bucket(state.get('updated_seconds'))}",
+                )
 
     async def _sync_bot_errors(self, cur, drone: str) -> None:
         cfg = BOT_SCHEMAS[drone]
