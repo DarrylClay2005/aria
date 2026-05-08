@@ -11,8 +11,8 @@ from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
 
 logger = logging.getLogger("discord")
-MAX_ATTACHMENT_BYTES = 200_000
-MAX_ATTACHMENT_CHARS = 50000
+MAX_ATTACHMENT_BYTES = 500_000
+MAX_ATTACHMENT_CHARS = 500_000
 MAX_AUDIT_PASSES = 5
 CODE_FENCE_RE = re.compile(r"```(?:[\w.+-]+)?\n(.*?)```", re.DOTALL)
 AUDIT_VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FIX)", re.IGNORECASE)

@@ -11,6 +11,8 @@ from typing import Any
 from core.settings import (
     GEMINI_FALLBACK_MODELS,
     GEMINI_MODEL_ID,
+    GROK_FALLBACK_MODELS,
+    GROK_MODEL_ID,
     GROQ_FALLBACK_MODELS,
     GROQ_MODEL_ID,
     OPENAI_FALLBACK_MODELS,
@@ -19,7 +21,7 @@ from core.settings import (
 
 logger = logging.getLogger("discord")
 DEFAULT_TIMEOUT_SECONDS = max(20, int(os.getenv("ARIA_AI_TIMEOUT_SECONDS", "90")))
-DEFAULT_PROMPT_LIMIT = max(4096, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "60000")))
+DEFAULT_PROMPT_LIMIT = max(4096, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "600000")))
 DEFAULT_SYSTEM_LIMIT = max(2048, int(os.getenv("ARIA_AI_MAX_SYSTEM_CHARS", "12000")))
 DEFAULT_MAX_RETRY_DELAY_SECONDS = max(3.0, float(os.getenv("ARIA_AI_MAX_RETRY_DELAY_SECONDS", "20")))
 DEFAULT_RETRY_ATTEMPTS = max(0, int(os.getenv("ARIA_AI_RETRY_ATTEMPTS", "1")))
@@ -45,6 +47,10 @@ class AIService:
         fallback_models: list[str] | None = None,
         retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
         max_retry_delay_seconds: float = DEFAULT_MAX_RETRY_DELAY_SECONDS,
+        grok_model_id: str | None = None,
+        grok_api_key: str | None = None,
+        grok_fallback_models: list[str] | None = None,
+        enable_grok_primary: bool | None = None,
         groq_model_id: str | None = None,
         groq_api_key: str | None = None,
         groq_fallback_models: list[str] | None = None,
@@ -62,6 +68,29 @@ class AIService:
             or os.getenv("ARIA_GEMINI_API_KEY", "")
             or os.getenv("GEMINI_API_KEY", "")
         ).strip()
+
+        self.grok_model_id = (grok_model_id or GROK_MODEL_ID).strip() or "grok-4.3"
+        configured_grok_fallbacks = grok_fallback_models if grok_fallback_models is not None else GROK_FALLBACK_MODELS
+        self.grok_fallback_models = self._dedupe_models(self.grok_model_id, configured_grok_fallbacks)
+        self.grok_api_key = (
+            grok_api_key
+            or os.getenv("ARIA_GROK_API_KEY", "")
+            or os.getenv("GROK_API_KEY", "")
+            or os.getenv("ARIA_XAI_API_KEY", "")
+            or os.getenv("XAI_API_KEY", "")
+        ).strip()
+        if enable_grok_primary is None:
+            env_value = str(
+                os.getenv("ARIA_ENABLE_GROK_PRIMARY", "")
+                or os.getenv("ARIA_ENABLE_GROK_FALLBACK", "")
+                or ""
+            ).strip().lower()
+            if env_value:
+                self.enable_grok_primary = env_value in {"1", "true", "yes", "on"}
+            else:
+                self.enable_grok_primary = bool(self.grok_api_key)
+        else:
+            self.enable_grok_primary = bool(enable_grok_primary)
 
         self.groq_model_id = (groq_model_id or GROQ_MODEL_ID).strip() or "meta-llama/llama-4-scout-17b-16e-instruct"
         configured_groq_fallbacks = groq_fallback_models if groq_fallback_models is not None else GROQ_FALLBACK_MODELS
@@ -108,6 +137,7 @@ class AIService:
 
         self._gemini_client = None
         self._gemini_types = None
+        self._grok_client = None
         self._groq_client = None
         self._openai_client = None
         self._rate_limited_until = 0.0
@@ -225,6 +255,9 @@ class AIService:
     def _has_openai_fallback(self) -> bool:
         return self.enable_openai_fallback and bool(self.openai_api_key)
 
+    def _has_grok_primary(self) -> bool:
+        return self.enable_grok_primary and bool(self.grok_api_key)
+
     def _has_groq_fallback(self) -> bool:
         return self.enable_groq_fallback and bool(self.groq_api_key)
 
@@ -250,6 +283,30 @@ class AIService:
         self._gemini_client = genai.Client(api_key=self.api_key)
         self._gemini_types = types
         return self._gemini_client, self._gemini_types
+
+    def _ensure_grok_client(self):
+        if not self.grok_api_key:
+            raise AIServiceUnavailable(
+                "GROK_API_KEY is not configured.",
+                "My Grok backend is not configured yet. Add `ARIA_GROK_API_KEY`, `ARIA_XAI_API_KEY`, or `XAI_API_KEY` to use it.",
+            )
+
+        if self._grok_client is not None:
+            return self._grok_client
+
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise AIServiceUnavailable(
+                "openai is not installed.",
+                "My Grok backend package is missing on this host, so the chat commands can't boot yet.",
+            ) from exc
+
+        self._grok_client = OpenAI(
+            api_key=self.grok_api_key,
+            base_url="https://api.x.ai/v1",
+        )
+        return self._grok_client
 
     def _ensure_groq_client(self):
         if not self.groq_api_key:
@@ -539,6 +596,28 @@ class AIService:
             provider_not_available_message,
         ) from last_exc
 
+    async def _generate_grok_response(
+        self,
+        *,
+        prompt: str,
+        system_instruction: str | None = None,
+        attachment_bytes: bytes | None = None,
+        attachment_mime_type: str | None = None,
+        attachment_name: str | None = None,
+    ) -> str:
+        return await self._generate_openai_compatible_response(
+            provider_label="Grok",
+            provider_not_available_message=self._service_unavailable_public_message("Grok"),
+            ensure_client=self._ensure_grok_client,
+            primary_model_id=self.grok_model_id,
+            fallback_models=self.grok_fallback_models,
+            prompt=prompt,
+            system_instruction=system_instruction,
+            attachment_bytes=attachment_bytes,
+            attachment_mime_type=attachment_mime_type,
+            attachment_name=attachment_name,
+        )
+
     async def _generate_groq_response(
         self,
         *,
@@ -592,8 +671,25 @@ class AIService:
         attachment_mime_type: str | None = None,
         attachment_name: str | None = None,
     ) -> str:
+        primary_failures: list[tuple[str, Exception]] = []
         gemini_unavailable: AIServiceUnavailable | None = None
         backup_failures: list[tuple[str, AIServiceUnavailable]] = []
+
+        if self._has_grok_primary():
+            try:
+                return await self._generate_grok_response(
+                    prompt=prompt,
+                    system_instruction=system_instruction,
+                    attachment_bytes=attachment_bytes,
+                    attachment_mime_type=attachment_mime_type,
+                    attachment_name=attachment_name,
+                )
+            except AIServiceUnavailable as exc:
+                primary_failures.append(("Grok", exc))
+                logger.warning("Grok primary path unavailable; attempting configured backup providers: %s", exc)
+            except Exception as exc:
+                primary_failures.append(("Grok", exc))
+                logger.exception("Grok primary path failed unexpectedly; attempting configured backup providers: %s", exc)
 
         if self.api_key:
             try:
@@ -614,12 +710,29 @@ class AIService:
             except AIServiceUnavailable as exc:
                 gemini_unavailable = exc
                 if not self._has_groq_fallback() and not self._has_openai_fallback():
+                    if primary_failures:
+                        label, primary_exc = primary_failures[0]
+                        raise AIServiceUnavailable(
+                            f"{label} failed first ({primary_exc}); Gemini failed after that ({exc}).",
+                            self._fallback_failure_public_message(),
+                        ) from exc
                     raise
                 logger.warning("Gemini path unavailable; attempting configured backup providers: %s", exc)
         elif not self._has_groq_fallback() and not self._has_openai_fallback():
+            if primary_failures:
+                label, primary_exc = primary_failures[0]
+                public_message = (
+                    primary_exc.public_message
+                    if isinstance(primary_exc, AIServiceUnavailable)
+                    else "My Grok backend is not available right now, and no backup provider is configured."
+                )
+                raise AIServiceUnavailable(
+                    f"{label} failed and no backup provider is configured: {primary_exc}",
+                    public_message,
+                ) from primary_exc
             raise AIServiceUnavailable(
                 "No AI provider is configured.",
-                "No AI backend is configured right now. Add `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` and try again.",
+                "No AI backend is configured right now. Add `ARIA_GROK_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` and try again.",
             )
 
         backup_providers: list[tuple[str, Any]] = []
@@ -646,16 +759,20 @@ class AIService:
                     failure_summary = "; ".join(
                         f"{label} failed ({failure})" for label, failure in backup_failures
                     )
+                    primary_summary = "; ".join(f"{label} failed ({failure})" for label, failure in primary_failures)
+                    prefix = f"{primary_summary}; " if primary_summary else ""
                     raise AIServiceUnavailable(
-                        f"Gemini failed first ({gemini_unavailable}); {failure_summary}.",
+                        f"{prefix}Gemini failed ({gemini_unavailable}); {failure_summary}.",
                         self._fallback_failure_public_message(),
                     ) from fallback_exc
                 raise
 
         if gemini_unavailable is not None and backup_failures:
             failure_summary = "; ".join(f"{label} failed ({failure})" for label, failure in backup_failures)
+            primary_summary = "; ".join(f"{label} failed ({failure})" for label, failure in primary_failures)
+            prefix = f"{primary_summary}; " if primary_summary else ""
             raise AIServiceUnavailable(
-                f"Gemini failed first ({gemini_unavailable}); {failure_summary}.",
+                f"{prefix}Gemini failed ({gemini_unavailable}); {failure_summary}.",
                 self._fallback_failure_public_message(),
             ) from backup_failures[-1][1]
         raise AIServiceUnavailable("No AI provider returned a usable response.")

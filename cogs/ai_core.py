@@ -5,9 +5,13 @@ import aiomysql
 import logging
 import re
 import io
-import os
 from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from core.ai_service import AIServiceUnavailable
+from core.chat_attachments import (
+    MAX_CHAT_ATTACHMENTS,
+    build_chat_upload_prompt,
+    prepare_chat_uploads,
+)
 from core.database import db
 from core.webhooks import send_error_webhook_log
 
@@ -16,16 +20,6 @@ logger = logging.getLogger("discord")
 DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
 FILE_REQUEST_RE = re.compile(r"\b(updated|fixed|corrected|patched)\s+(file|code)\b|\b(send|upload|return|give)\b.*\b(file|code|it)\b", re.IGNORECASE)
 AFFIRM_ONLY_RE = re.compile(r"^(yes|yeah|yep|sure|please do|do it|send it|upload it|return it|i would|yes please)\b", re.IGNORECASE)
-TEXT_MIME_PREFIXES = ("text/",)
-TEXT_MIME_EXACT = {
-    "application/json",
-    "application/javascript",
-    "application/xml",
-    "application/yaml",
-    "application/x-yaml",
-}
-MAX_CHAT_ATTACHMENT_BYTES = max(100_000, int(os.getenv("ARIA_CHAT_ATTACHMENT_MAX_BYTES", "6000000") or "6000000"))
-
 class AICore(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -77,77 +71,6 @@ class AICore(commands.Cog):
                 embed = discord.Embed(description=chunk, color=color)
             await interaction.followup.send(embed=embed)
 
-    @staticmethod
-    def _looks_text_like(attachment: discord.Attachment) -> bool:
-        content_type = (attachment.content_type or "").lower()
-        if any(content_type.startswith(prefix) for prefix in TEXT_MIME_PREFIXES):
-            return True
-        if content_type in TEXT_MIME_EXACT:
-            return True
-        filename = (attachment.filename or "").lower()
-        return filename.endswith(
-            (
-                ".txt",
-                ".md",
-                ".py",
-                ".js",
-                ".ts",
-                ".tsx",
-                ".jsx",
-                ".json",
-                ".yaml",
-                ".yml",
-                ".toml",
-                ".ini",
-                ".cfg",
-                ".conf",
-                ".log",
-                ".csv",
-                ".html",
-                ".css",
-                ".xml",
-            )
-        )
-
-    async def _prepare_chat_attachment(
-        self,
-        attachment: discord.Attachment | None,
-    ) -> tuple[bytes | None, str | None, str | None, str | None]:
-        if attachment is None:
-            return None, None, None, None
-        if attachment.size > MAX_CHAT_ATTACHMENT_BYTES:
-            raise ValueError(
-                f"`{attachment.filename}` is too large for `/aria` context here. Keep it under {MAX_CHAT_ATTACHMENT_BYTES // 1000} KB."
-            )
-        payload = await attachment.read()
-        if not payload:
-            raise ValueError(f"`{attachment.filename}` was empty.")
-
-        content_type = (attachment.content_type or "").strip().lower()
-        if content_type.startswith("image/"):
-            note = f"image attachment `{attachment.filename}`"
-            return payload, content_type, attachment.filename, note
-
-        if self._looks_text_like(attachment):
-            try:
-                text = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                try:
-                    text = payload.decode("latin-1")
-                except UnicodeDecodeError as exc:
-                    raise ValueError(f"`{attachment.filename}` could not be decoded as readable text.") from exc
-            cleaned = text.strip()
-            if not cleaned:
-                raise ValueError(f"`{attachment.filename}` was empty.")
-            if len(cleaned) > 12000:
-                cleaned = cleaned[:11950].rstrip() + "\n\n[Attachment truncated for chat context]"
-            note = f"text attachment `{attachment.filename}`"
-            return cleaned.encode("utf-8"), "text/plain", attachment.filename, note
-
-        raise ValueError(
-            f"`{attachment.filename}` is not a supported `/aria` context file yet. Send an image or a readable text file."
-        )
-
     async def _maybe_deliver_pending_code_file(self, ctx, prompt: str):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         if not actor:
@@ -182,6 +105,48 @@ class AICore(commands.Cog):
         if artifact_id:
             await self.aria_core.learning.consume_file_offer(artifact_id=artifact_id)
         return True
+
+    async def _prompt_with_upload_context(
+        self,
+        ctx,
+        prompt: str,
+        attachments: list[discord.Attachment] | tuple[discord.Attachment | None, ...] | None,
+    ) -> tuple[str, str | None, dict | None]:
+        actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
+        if not actor:
+            return prompt, None, None
+
+        guild = getattr(ctx, "guild", None)
+        guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
+        channel = getattr(ctx, "channel", None)
+        channel_id = getattr(channel, "id", None) or getattr(ctx, "channel_id", None)
+        message_id = getattr(ctx, "id", None)
+
+        selected = [attachment for attachment in (attachments or []) if attachment is not None]
+        fresh_uploads = await prepare_chat_uploads(selected) if selected else []
+        active_uploads = []
+
+        try:
+            if fresh_uploads:
+                await self.aria_core.learning.store_chat_uploads(
+                    user_id=int(actor.id),
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    uploads=fresh_uploads,
+                    ttl_seconds=300,
+                )
+            active_uploads = await self.aria_core.learning.active_chat_uploads(
+                user_id=int(actor.id),
+                guild_id=guild_id,
+                channel_id=channel_id,
+                limit=MAX_CHAT_ATTACHMENTS,
+            )
+        except Exception:
+            logger.exception("Failed to store/load Aria chat upload context; using current attachments only.")
+            active_uploads = fresh_uploads
+
+        return build_chat_upload_prompt(prompt, active_uploads)
 
     async def generate_aria_reply(
         self,
@@ -239,11 +204,21 @@ class AICore(commands.Cog):
                 await self._reply_chunked(message, control_result)
                 return
 
-            response_text = await self.generate_aria_reply(
+            contextual_prompt, attachment_context_note, direct_attachment = await self._prompt_with_upload_context(
+                message,
                 prompt,
+                list(message.attachments or []),
+            )
+            direct_attachment = direct_attachment or {}
+            response_text = await self.generate_aria_reply(
+                contextual_prompt,
                 DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=message,
                 source_kind="mention_chat",
+                attachment_bytes=direct_attachment.get("attachment_bytes"),
+                attachment_name=direct_attachment.get("attachment_name"),
+                attachment_mime_type=direct_attachment.get("attachment_mime_type"),
+                attachment_context_note=attachment_context_note,
             )
             await self._reply_chunked(
                 message,
@@ -363,8 +338,21 @@ class AICore(commands.Cog):
     @app_commands.describe(
         prompt="What you want to say or ask Aria",
         file="Optional screenshot or readable file for extra context",
+        file2="Optional second file for extra context",
+        file3="Optional third file for extra context",
+        file4="Optional fourth file for extra context",
+        file5="Optional fifth file for extra context",
     )
-    async def aria(self, interaction: discord.Interaction, prompt: str, file: discord.Attachment | None = None):
+    async def aria(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        file: discord.Attachment | None = None,
+        file2: discord.Attachment | None = None,
+        file3: discord.Attachment | None = None,
+        file4: discord.Attachment | None = None,
+        file5: discord.Attachment | None = None,
+    ):
         prompt = prompt.strip()
         if not prompt:
             return await interaction.response.send_message(
@@ -381,26 +369,21 @@ class AICore(commands.Cog):
                 await self._send_followup_chunked(interaction, control_result)
                 return
 
-            attachment_bytes = None
-            attachment_mime_type = None
-            attachment_name = None
-            attachment_context_note = None
-            if file is not None:
-                (
-                    attachment_bytes,
-                    attachment_mime_type,
-                    attachment_name,
-                    attachment_context_note,
-                ) = await self._prepare_chat_attachment(file)
+            contextual_prompt, attachment_context_note, direct_attachment = await self._prompt_with_upload_context(
+                interaction,
+                prompt,
+                (file, file2, file3, file4, file5),
+            )
+            direct_attachment = direct_attachment or {}
 
             reply = await self.generate_aria_reply(
-                prompt,
+                contextual_prompt,
                 DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=interaction,
                 source_kind="slash_chat",
-                attachment_bytes=attachment_bytes,
-                attachment_name=attachment_name,
-                attachment_mime_type=attachment_mime_type,
+                attachment_bytes=direct_attachment.get("attachment_bytes"),
+                attachment_name=direct_attachment.get("attachment_name"),
+                attachment_mime_type=direct_attachment.get("attachment_mime_type"),
                 attachment_context_note=attachment_context_note,
             )
             await self._send_followup_chunked(interaction, reply)

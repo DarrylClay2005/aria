@@ -189,6 +189,26 @@ class LearningEngine:
                     )
                     """
                 )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS aria_chat_uploads (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NULL,
+                        channel_id BIGINT NULL,
+                        message_id BIGINT NULL,
+                        filename VARCHAR(255) NULL,
+                        mime_type VARCHAR(128) NOT NULL DEFAULT 'application/octet-stream',
+                        size_bytes INT NOT NULL DEFAULT 0,
+                        content_text MEDIUMTEXT NULL,
+                        content_bytes MEDIUMBLOB NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL,
+                        INDEX idx_chat_upload_scope (user_id, guild_id, channel_id, expires_at),
+                        INDEX idx_chat_upload_expiry (expires_at)
+                    )
+                    """
+                )
 
                 await cur.execute(
                     """
@@ -587,6 +607,101 @@ class LearningEngine:
                     """,
                     (artifact_id,),
                 )
+
+    async def prune_expired_chat_uploads(self) -> None:
+        if not db.pool:
+            return
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM aria_chat_uploads WHERE expires_at <= NOW()")
+
+    async def store_chat_uploads(
+        self,
+        *,
+        user_id: int,
+        guild_id: int | None,
+        channel_id: int | None,
+        message_id: int | None,
+        uploads: list[dict],
+        ttl_seconds: int = 300,
+    ) -> None:
+        if not db.pool or not user_id or not uploads:
+            return
+        ttl_seconds = max(30, min(3600, int(ttl_seconds)))
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM aria_chat_uploads WHERE expires_at <= NOW()")
+                for upload in uploads:
+                    await cur.execute(
+                        """
+                        INSERT INTO aria_chat_uploads (
+                            user_id, guild_id, channel_id, message_id, filename, mime_type,
+                            size_bytes, content_text, content_bytes, expires_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, DATE_ADD(NOW(), INTERVAL %s SECOND))
+                        """,
+                        (
+                            user_id,
+                            guild_id,
+                            channel_id,
+                            message_id,
+                            str(upload.get("filename") or "")[:255] or None,
+                            str(upload.get("mime_type") or "application/octet-stream")[:128],
+                            int(upload.get("size_bytes") or 0),
+                            upload.get("content_text"),
+                            upload.get("content_bytes"),
+                            ttl_seconds,
+                        ),
+                    )
+
+    async def active_chat_uploads(
+        self,
+        *,
+        user_id: int,
+        guild_id: int | None,
+        channel_id: int | None,
+        limit: int = 10,
+    ) -> list[dict]:
+        if not db.pool or not user_id:
+            return []
+
+        clauses = ["user_id = %s", "expires_at > NOW()"]
+        params: list[object] = [user_id]
+        if guild_id is None:
+            clauses.append("guild_id IS NULL")
+        else:
+            clauses.append("guild_id = %s")
+            params.append(guild_id)
+        if channel_id is None:
+            clauses.append("channel_id IS NULL")
+        else:
+            clauses.append("channel_id = %s")
+            params.append(channel_id)
+
+        where = " AND ".join(clauses)
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM aria_chat_uploads WHERE expires_at <= NOW()")
+                await cur.execute(
+                    f"""
+                    SELECT id, filename, mime_type, size_bytes, content_text, content_bytes, created_at, expires_at
+                    FROM aria_chat_uploads
+                    WHERE {where}
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (*params, int(limit)),
+                )
+                rows = await cur.fetchall() or []
+
+        out = []
+        cols = ["id", "filename", "mime_type", "size_bytes", "content_text", "content_bytes", "created_at", "expires_at"]
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(row)
+            else:
+                out.append(dict(zip(cols, row, strict=False)))
+        return out
 
     async def record_command_pattern(
         self,

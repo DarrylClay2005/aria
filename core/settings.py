@@ -60,6 +60,12 @@ GEMINI_FALLBACK_MODELS = [
     for value in prefixed_env("GEMINI_FALLBACK_MODELS", os.getenv("GEMINI_FALLBACK_MODELS", "")).split(",")
     if value.strip()
 ]
+GROK_MODEL_ID = prefixed_env("GROK_MODEL", os.getenv("GROK_MODEL", "grok-4.3")).strip() or "grok-4.3"
+GROK_FALLBACK_MODELS = [
+    value.strip()
+    for value in prefixed_env("GROK_FALLBACK_MODELS", os.getenv("GROK_FALLBACK_MODELS", "")).split(",")
+    if value.strip()
+]
 GROQ_MODEL_ID = (
     prefixed_env(
         "GROQ_MODEL",

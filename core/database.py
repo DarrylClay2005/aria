@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import warnings
 
 from core.settings import DB_CONFIG
 
@@ -11,6 +12,8 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("discord")
 _ORIGINAL_CREATE_POOL = aiomysql.create_pool if aiomysql else None
+warnings.filterwarnings("ignore", message=".*already exists.*", category=Warning, module=r"aiomysql\..*")
+warnings.filterwarnings("ignore", message="Can't create database .*; database exists", category=Warning, module=r"aiomysql\..*")
 
 
 async def ensure_database_exists():
@@ -33,9 +36,14 @@ async def ensure_database_exists():
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
-                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+                (db_name,),
             )
+            if not await cur.fetchone():
+                await cur.execute(
+                    f"CREATE DATABASE `{db_name}` "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
     finally:
         conn.close()
 

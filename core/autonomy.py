@@ -1059,7 +1059,12 @@ class AutonomousEngine:
     async def ensure_bot_schema(self, cur, drone: str) -> None:
         cfg = BOT_SCHEMAS[drone]
         schema = cfg["schema"]
-        await cur.execute(f"CREATE DATABASE IF NOT EXISTS {schema}")
+        await cur.execute(
+            "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+            (schema,),
+        )
+        if not await cur.fetchone():
+            await cur.execute(f"CREATE DATABASE `{schema}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         await cur.execute(
             f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['queue']} (id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL, position INT NULL, track_data LONGTEXT NULL, requested_by BIGINT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )

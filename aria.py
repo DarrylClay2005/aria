@@ -11,6 +11,7 @@ from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
+from core.chat_attachments import MAX_CHAT_ATTACHMENTS, build_chat_upload_prompt, prepare_chat_uploads
 from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
 from core.webhooks import install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
@@ -166,17 +167,48 @@ async def on_message(message):
             await message.channel.send(response)
             return
 
+        selected_uploads = list(message.attachments or [])
+        fresh_uploads = await prepare_chat_uploads(selected_uploads) if selected_uploads else []
+        active_uploads = []
+        try:
+            if fresh_uploads:
+                await bot.aria_core.learning.store_chat_uploads(
+                    user_id=int(message.author.id),
+                    guild_id=message.guild.id if message.guild else None,
+                    channel_id=message.channel.id if message.channel else None,
+                    message_id=message.id,
+                    uploads=fresh_uploads,
+                    ttl_seconds=300,
+                )
+            active_uploads = await bot.aria_core.learning.active_chat_uploads(
+                user_id=int(message.author.id),
+                guild_id=message.guild.id if message.guild else None,
+                channel_id=message.channel.id if message.channel else None,
+                limit=MAX_CHAT_ATTACHMENTS,
+            )
+        except Exception:
+            logger.exception("Failed to store/load Aria prefix upload context; using current attachments only.")
+            active_uploads = fresh_uploads
+
+        contextual_prompt, attachment_context_note, direct_attachment = build_chat_upload_prompt(prompt, active_uploads)
+        direct_attachment = direct_attachment or {}
         reply = await bot.aria_core.chat(
-            prompt,
+            contextual_prompt,
             system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
             user_id=message.author.id,
             guild_id=message.guild.id if message.guild else None,
             user_name=message.author.display_name,
             source_kind="prefix_chat",
             response_style="prefix_chat",
+            attachment_bytes=direct_attachment.get("attachment_bytes"),
+            attachment_name=direct_attachment.get("attachment_name"),
+            attachment_mime_type=direct_attachment.get("attachment_mime_type"),
+            attachment_context_note=attachment_context_note,
         )
         await message.channel.send(reply)
 
+    except ValueError as e:
+        await message.channel.send(str(e))
     except Exception as e:
         logger.exception("[ARIA ERROR] %s", e)
         await send_error_webhook_log("Aria Message Handler Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))
