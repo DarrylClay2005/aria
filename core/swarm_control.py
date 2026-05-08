@@ -660,6 +660,8 @@ class SwarmController:
         bot_name = normalize_drone_name(drone)
         if not bot_name:
             return "I need a valid swarm node name to restore a backup."
+        if not db.pool:
+            return "My swarm database link is offline right now."
 
         requester = actor_from_ctx(ctx)
         async with db.pool.acquire() as conn:

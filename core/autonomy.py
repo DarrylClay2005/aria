@@ -80,6 +80,7 @@ class AutonomousEngine:
         self._infra_timeout_seconds = max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45'))
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        self._infra_auto_escalation_enabled = str(os.getenv('ARIA_AUTO_ESCALATE_INFRA_REPAIRS', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
 
     async def ensure_repair_tables(self) -> None:
         if not db.pool:
@@ -414,6 +415,25 @@ class AutonomousEngine:
         await self.ensure_repair_tables()
         command_text = self._infra_command_for_target(target)
         priority = float(issue.get("_priority_score") if issue.get("_priority_score") is not None else self._issue_priority_score(issue))
+        if not self._infra_auto_escalation_enabled:
+            await self._record_infra_history(
+                target=target,
+                action=action,
+                issue=issue,
+                success=False,
+                execution_mode="guarded",
+                command_text=command_text,
+                result_text=f"automatic infra escalation suppressed: {reason}",
+            )
+            try:
+                await send_ops_webhook_log(
+                    "Aria Infra Guarded",
+                    f"Suppressed automatic {action} for {target}.",
+                    fields=[("Reason", reason[:512], False), ("Issue", str(issue.get('type') or 'unknown')[:128], True)],
+                )
+            except Exception:
+                pass
+            return False
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -456,6 +476,8 @@ class AutonomousEngine:
 
     async def _execute_infra_task(self, task: dict[str, Any]) -> tuple[bool, str, str]:
         command_text = str(task.get("command_text") or self._infra_command_for_target(task.get("target_name")) or "").strip()
+        if not self._infra_auto_escalation_enabled and str(task.get("issue_type") or "") not in {"manual_restart", "operator_restart"}:
+            return False, "guarded", "automatic infrastructure execution is guarded"
         if not self._infra_enabled:
             return False, "disabled", "infrastructure control is disabled"
         if not command_text:
@@ -492,7 +514,7 @@ class AutonomousEngine:
             success, mode, result_text = await self._execute_infra_task(task)
             new_attempts = int(task.get("attempt_count") or 0) + 1
             max_attempts = int(task.get("max_attempts") or 2)
-            status = "resolved" if success else ("manual_needed" if mode in {"manual", "planned", "disabled"} else ("failed" if new_attempts >= max_attempts else "pending"))
+            status = "resolved" if success else ("manual_needed" if mode in {"manual", "planned", "disabled", "guarded"} else ("failed" if new_attempts >= max_attempts else "pending"))
             async with db.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     if status == "pending":
@@ -1039,34 +1061,48 @@ class AutonomousEngine:
         schema = cfg["schema"]
         await cur.execute(f"CREATE DATABASE IF NOT EXISTS {schema}")
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['queue']} (guild_id BIGINT, position INT, track_data LONGTEXT, requested_by BIGINT NULL, PRIMARY KEY (guild_id, position))"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['queue']} (id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL, position INT NULL, track_data LONGTEXT NULL, requested_by BIGINT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['backup']} (guild_id BIGINT, position INT, track_data LONGTEXT, requested_by BIGINT NULL, PRIMARY KEY (guild_id, position))"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['backup']} (id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL, position INT NULL, track_data LONGTEXT NULL, requested_by BIGINT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['playback']} (guild_id BIGINT PRIMARY KEY, channel_id BIGINT NULL, text_channel_id BIGINT NULL, current_track LONGTEXT NULL, position_seconds DOUBLE DEFAULT 0, is_playing BOOLEAN DEFAULT FALSE, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['playback']} (guild_id BIGINT, bot_name VARCHAR(50), channel_id BIGINT NULL, text_channel_id BIGINT NULL, video_url TEXT NULL, title TEXT NULL, current_track LONGTEXT NULL, position_seconds INT DEFAULT 0, is_playing BOOLEAN DEFAULT FALSE, is_paused BOOLEAN DEFAULT FALSE, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, bot_name))"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['home']} (guild_id BIGINT PRIMARY KEY, home_vc_id BIGINT NULL)"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['home']} (guild_id BIGINT, bot_name VARCHAR(50), home_vc_id BIGINT NULL, PRIMARY KEY (guild_id, bot_name))"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['direct']} (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, command VARCHAR(50), data LONGTEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['direct']} (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT NULL, text_channel_id BIGINT NULL, command VARCHAR(50), data LONGTEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['override']} (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['override']} (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, PRIMARY KEY(guild_id, bot_name))"
         )
         # Compatibility helpers for legacy music-bot schemas.
         for stmt in [
+            f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN bot_name VARCHAR(50) DEFAULT '{drone}'",
             f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN text_channel_id BIGINT NULL",
+            f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN video_url TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN title TEXT NULL",
             f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN current_track LONGTEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN is_paused BOOLEAN DEFAULT FALSE",
             f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+            f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN bot_name VARCHAR(50) DEFAULT '{drone}'",
+            f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN video_url TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN title TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN requester_id BIGINT DEFAULT NULL",
             f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN position INT NULL",
             f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN track_data LONGTEXT NULL",
             f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN requested_by BIGINT NULL",
+            f"ALTER TABLE {schema}.{cfg['queue']} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN bot_name VARCHAR(50) DEFAULT '{drone}'",
+            f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN video_url TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN title TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN requester_id BIGINT DEFAULT NULL",
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN position INT NULL",
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN track_data LONGTEXT NULL",
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN requested_by BIGINT NULL",
+            f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             f"ALTER TABLE {schema}.{cfg['home']} ADD COLUMN bot_name VARCHAR(50) NULL",
             f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
             f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN last_error TEXT NULL",
@@ -1078,11 +1114,36 @@ class AutonomousEngine:
                 await cur.execute(stmt)
             except Exception:
                 pass
+        for table_key in ("queue", "backup"):
+            table = cfg[table_key]
+            try:
+                cols = await self._table_columns(cur, schema, table)
+                if "id" not in cols:
+                    try:
+                        await cur.execute(f"ALTER TABLE {schema}.{table} ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST")
+                    except Exception:
+                        try:
+                            await cur.execute(f"ALTER TABLE {schema}.{table} DROP PRIMARY KEY")
+                        except Exception:
+                            pass
+                        try:
+                            await cur.execute(f"ALTER TABLE {schema}.{table} ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         for stmt in [
+            f"UPDATE {schema}.{cfg['playback']} SET bot_name = COALESCE(bot_name, '{drone}') WHERE bot_name IS NULL OR bot_name = ''",
             f"UPDATE {schema}.{cfg['playback']} SET current_track = COALESCE(NULLIF(current_track, ''), NULLIF(video_url, ''), NULLIF(title, '')) WHERE current_track IS NULL OR current_track = ''",
+            f"UPDATE {schema}.{cfg['queue']} SET bot_name = COALESCE(bot_name, '{drone}') WHERE bot_name IS NULL OR bot_name = ''",
+            f"UPDATE {schema}.{cfg['queue']} SET video_url = COALESCE(NULLIF(video_url, ''), NULLIF(track_data, ''), NULLIF(title, '')) WHERE video_url IS NULL OR video_url = ''",
+            f"UPDATE {schema}.{cfg['queue']} SET title = COALESCE(NULLIF(title, ''), NULLIF(track_data, ''), NULLIF(video_url, '')) WHERE title IS NULL OR title = ''",
             f"UPDATE {schema}.{cfg['queue']} SET requested_by = COALESCE(requested_by, requester_id) WHERE requested_by IS NULL",
             f"UPDATE {schema}.{cfg['queue']} SET track_data = COALESCE(NULLIF(track_data, ''), NULLIF(video_url, ''), NULLIF(title, '')) WHERE track_data IS NULL OR track_data = ''",
             f"UPDATE {schema}.{cfg['queue']} SET position = id WHERE position IS NULL AND id IS NOT NULL",
+            f"UPDATE {schema}.{cfg['backup']} SET bot_name = COALESCE(bot_name, '{drone}') WHERE bot_name IS NULL OR bot_name = ''",
+            f"UPDATE {schema}.{cfg['backup']} SET video_url = COALESCE(NULLIF(video_url, ''), NULLIF(track_data, ''), NULLIF(title, '')) WHERE video_url IS NULL OR video_url = ''",
+            f"UPDATE {schema}.{cfg['backup']} SET title = COALESCE(NULLIF(title, ''), NULLIF(track_data, ''), NULLIF(video_url, '')) WHERE title IS NULL OR title = ''",
             f"UPDATE {schema}.{cfg['backup']} SET requested_by = COALESCE(requested_by, requester_id) WHERE requested_by IS NULL",
             f"UPDATE {schema}.{cfg['backup']} SET track_data = COALESCE(NULLIF(track_data, ''), NULLIF(video_url, ''), NULLIF(title, '')) WHERE track_data IS NULL OR track_data = ''",
             f"UPDATE {schema}.{cfg['backup']} SET position = id WHERE position IS NULL AND id IS NOT NULL",
