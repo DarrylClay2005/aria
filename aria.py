@@ -102,7 +102,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="My show. Fuck Off"
+            name="Over your dumbasses"
         ),
         status=discord.Status.dnd
     )
