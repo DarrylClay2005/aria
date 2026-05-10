@@ -81,6 +81,12 @@ class AutonomousEngine:
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_auto_escalation_enabled = str(os.getenv('ARIA_AUTO_ESCALATE_INFRA_REPAIRS', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        # Global recovery pressure controls. These keep Aria from issuing a swarm-wide
+        # RECOVER storm during Discord voice/Lavalink instability.
+        self._swarm_recovery_window_seconds = max(30, int(os.getenv('ARIA_SWARM_RECOVERY_WINDOW_SECONDS', '90') or '90'))
+        self._swarm_recovery_max_per_guild = max(1, int(os.getenv('ARIA_SWARM_RECOVERY_MAX_PER_GUILD', '3') or '3'))
+        self._swarm_recovery_max_global = max(2, int(os.getenv('ARIA_SWARM_RECOVERY_MAX_GLOBAL', '6') or '6'))
+        self._swarm_degraded_cooldown_seconds = max(60, int(os.getenv('ARIA_SWARM_DEGRADED_COOLDOWN_SECONDS', '180') or '180'))
 
     async def ensure_repair_tables(self) -> None:
         if not db.pool:
@@ -180,6 +186,23 @@ class AutonomousEngine:
                         last_triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                         INDEX idx_scope_time (guard_scope, last_triggered_at)
+                    )
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS aria_swarm_recovery_cooldowns (
+                        scope_key VARCHAR(128) PRIMARY KEY,
+                        scope_type VARCHAR(32) NOT NULL,
+                        guild_id BIGINT NULL,
+                        bot_name VARCHAR(64) NULL,
+                        reason VARCHAR(255) NULL,
+                        cooldown_until TIMESTAMP NOT NULL,
+                        details_json LONGTEXT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_cooldown_until (cooldown_until),
+                        INDEX idx_guild_cooldown (guild_id, cooldown_until)
                     )
                     """
                 )
@@ -680,17 +703,31 @@ class AutonomousEngine:
         try:
             async with db.pool.acquire() as conn:
                 async with conn.cursor(self._dict_cursor()) as cur:
-                    await cur.execute(
-                        f"""
-                        SELECT COUNT(*) AS c
-                        FROM {cfg['schema']}.{cfg['direct']}
-                        WHERE bot_name=%s
-                          AND guild_id=%s
-                          AND command=%s
-                          AND TIMESTAMPDIFF(SECOND, COALESCE(created_at, NOW()), NOW()) <= %s
-                        """,
-                        (drone, guild_id, command.upper(), int(within_seconds)),
-                    )
+                    await self.ensure_bot_schema(cur, drone)
+                    cols = await self._table_columns(cur, cfg['schema'], cfg['direct'])
+                    if "created_at" in cols:
+                        await cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS c
+                            FROM {cfg['schema']}.{cfg['direct']}
+                            WHERE bot_name=%s
+                              AND guild_id=%s
+                              AND command=%s
+                              AND TIMESTAMPDIFF(SECOND, created_at, NOW()) <= %s
+                            """,
+                            (drone, guild_id, command.upper(), int(within_seconds)),
+                        )
+                    else:
+                        await cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS c
+                            FROM {cfg['schema']}.{cfg['direct']}
+                            WHERE bot_name=%s
+                              AND guild_id=%s
+                              AND command=%s
+                            """,
+                            (drone, guild_id, command.upper()),
+                        )
                     row = await cur.fetchone()
         except Exception:
             return False
@@ -1078,7 +1115,7 @@ class AutonomousEngine:
             f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['home']} (guild_id BIGINT, bot_name VARCHAR(50), home_vc_id BIGINT NULL, PRIMARY KEY (guild_id, bot_name))"
         )
         await cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['direct']} (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT NULL, text_channel_id BIGINT NULL, command VARCHAR(50), data LONGTEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['direct']} (id BIGINT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT NULL, text_channel_id BIGINT NULL, command VARCHAR(50), data LONGTEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, claimed_at TIMESTAMP NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id), INDEX idx_recent_command (bot_name, guild_id, command, created_at))"
         )
         await cur.execute(
             f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['override']} (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, PRIMARY KEY(guild_id, bot_name))"
@@ -1109,9 +1146,13 @@ class AutonomousEngine:
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN requested_by BIGINT NULL",
             f"ALTER TABLE {schema}.{cfg['backup']} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
             f"ALTER TABLE {schema}.{cfg['home']} ADD COLUMN bot_name VARCHAR(50) NULL",
+            f"ALTER TABLE {schema}.{cfg['direct']} MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
             f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
             f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN last_error TEXT NULL",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN claimed_at TIMESTAMP NULL",
             f"ALTER TABLE {schema}.{cfg['direct']} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
+            f"ALTER TABLE {schema}.{cfg['direct']} ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
             f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
             f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN last_error TEXT NULL",
         ]:
@@ -1390,7 +1431,64 @@ class AutonomousEngine:
         issues.extend(await self.detect_swarm_issues())
         return self._rank_issues(issues)
 
-    async def _repair_queue_rebuild(self, cur, drone: str, guild_id: int) -> RepairResult:
+
+    async def _swarm_recovery_pressure_allowed(self, cur, issue: dict[str, Any]) -> tuple[bool, str]:
+        """Return False when recover pressure is high enough to enter degraded mode."""
+        await self.ensure_repair_tables()
+        drone = str(issue.get("drone") or "swarm").strip().lower() or "swarm"
+        guild_id = issue.get("guild_id")
+        scope_key = f"guild:{guild_id}" if guild_id else "global:swarm"
+        await cur.execute(
+            """
+            SELECT TIMESTAMPDIFF(SECOND, NOW(), cooldown_until) AS remaining, reason
+            FROM aria_swarm_recovery_cooldowns
+            WHERE scope_key=%s AND cooldown_until > NOW()
+            LIMIT 1
+            """,
+            (scope_key,),
+        )
+        row = await cur.fetchone()
+        if row:
+            remaining = int((row.get("remaining") if isinstance(row, dict) else row[0]) or 0)
+            reason = (row.get("reason") if isinstance(row, dict) else row[1]) or "swarm degraded cooldown"
+            return False, f"{reason}; cooldown {max(1, remaining)}s remaining"
+        try:
+            await cur.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN repair_action IN ('recover', 'recover_resume') THEN 1 ELSE 0 END) AS global_count,
+                  SUM(CASE WHEN repair_action IN ('recover', 'recover_resume') AND repair_scope=%s THEN 1 ELSE 0 END) AS bot_count
+                FROM aria_repair_journal
+                WHERE created_at >= NOW() - INTERVAL %s SECOND
+                """,
+                (drone, int(self._swarm_recovery_window_seconds)),
+            )
+            counts = await cur.fetchone() or {}
+        except Exception:
+            counts = {}
+        global_count = int((counts.get("global_count") if isinstance(counts, dict) else (counts[0] if counts else 0)) or 0)
+        bot_count = int((counts.get("bot_count") if isinstance(counts, dict) else (counts[1] if counts and len(counts) > 1 else 0)) or 0)
+        over_global = global_count >= self._swarm_recovery_max_global
+        over_guild = bool(guild_id) and bot_count >= self._swarm_recovery_max_per_guild
+        if not (over_global or over_guild):
+            return True, ""
+        reason = "global recover pressure" if over_global else "guild recover pressure"
+        await cur.execute(
+            """
+            INSERT INTO aria_swarm_recovery_cooldowns
+                (scope_key, scope_type, guild_id, bot_name, reason, cooldown_until, details_json)
+            VALUES (%s, %s, %s, %s, %s, DATE_ADD(NOW(), INTERVAL %s SECOND), %s)
+            ON DUPLICATE KEY UPDATE
+                reason=VALUES(reason),
+                cooldown_until=VALUES(cooldown_until),
+                details_json=VALUES(details_json),
+                updated_at=NOW()
+            """,
+            (scope_key, "guild" if guild_id else "global", guild_id, drone if drone != "swarm" else None, reason, int(self._swarm_degraded_cooldown_seconds), json.dumps({"issue": issue, "global_count": global_count, "bot_count": bot_count, "window_seconds": self._swarm_recovery_window_seconds}, default=str)[:4000]),
+        )
+        return False, f"{reason}; entered degraded cooldown for {self._swarm_degraded_cooldown_seconds}s"
+
+    async def _repair_queue_rebuild(self, cur, drone: str, guild_id: int, *, mark_not_playing: bool = False) -> RepairResult:
         playback = await self._fetch_playback_row(cur, drone, guild_id)
         queue_rows = await self._fetch_queue_rows(cur, drone, 'queue', guild_id)
         backup_rows = await self._fetch_queue_rows(cur, drone, 'backup', guild_id)
@@ -1405,15 +1503,22 @@ class AutonomousEngine:
                 'requested_by': None,
             }])
             inserted += 1
-        await cur.execute(
-            f"UPDATE {BOT_SCHEMAS[drone]['schema']}.{BOT_SCHEMAS[drone]['playback']} SET is_playing = FALSE, position_seconds = GREATEST(0, COALESCE(position_seconds,0)) WHERE guild_id=%s",
-            (guild_id,),
-        )
+        if mark_not_playing:
+            await cur.execute(
+                f"UPDATE {BOT_SCHEMAS[drone]['schema']}.{BOT_SCHEMAS[drone]['playback']} SET is_playing = FALSE, position_seconds = GREATEST(0, COALESCE(position_seconds,0)) WHERE guild_id=%s",
+                (guild_id,),
+            )
+        else:
+            await cur.execute(
+                f"UPDATE {BOT_SCHEMAS[drone]['schema']}.{BOT_SCHEMAS[drone]['playback']} SET position_seconds = GREATEST(0, COALESCE(position_seconds,0)) WHERE guild_id=%s",
+                (guild_id,),
+            )
         return RepairResult(True, "queue_rebuild", drone, details=f"rebuilt/restored {inserted} row(s)")
 
     async def _enqueue_direct_order(self, cur, drone: str, guild_id: int, command: str, *, vc_id: int | None = None, text_channel_id: int | None = None, data: str | None = None):
         cfg = BOT_SCHEMAS[drone]
         await self.ensure_bot_schema(cur, drone)
+        command = str(command or "").upper().strip()
         # De-dupe by command so Aria does not flood a music bot with repeated recovery orders.
         try:
             await cur.execute(
@@ -1436,6 +1541,9 @@ class AutonomousEngine:
         text_channel_id = issue.get("text_channel_id") or (playback or {}).get("text_channel_id")
         if not vc_id:
             return RepairResult(False, "recover", drone, "no home or playback channel available")
+        allowed, pressure_reason = await self._swarm_recovery_pressure_allowed(cur, issue)
+        if not allowed:
+            return RepairResult(True, "recover_degraded_guard", drone, pressure_reason)
         await self._enqueue_direct_order(cur, drone, guild_id, "RECOVER", vc_id=vc_id, text_channel_id=text_channel_id, data="aria_auto_recovery")
         await cur.execute(
             f"UPDATE {cfg['schema']}.{cfg['playback']} SET is_playing = FALSE, is_paused = FALSE WHERE guild_id=%s",
@@ -1499,7 +1607,7 @@ class AutonomousEngine:
             return await self._repair_queue_rebuild(cur, drone, guild_id)
         if strategy == 'recover_resume':
             await self._repair_invalid_state(cur, drone, guild_id)
-            await self._repair_queue_rebuild(cur, drone, guild_id)
+            await self._repair_queue_rebuild(cur, drone, guild_id, mark_not_playing=True)
             return await self._repair_recover_from_queue(cur, issue)
         if strategy == 'normalize_playback_state':
             return await self._repair_invalid_state(cur, drone, guild_id)

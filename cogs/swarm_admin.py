@@ -83,18 +83,44 @@ async def _ensure_direct_orders(cur, bot_name: str) -> None:
         "text_channel_id BIGINT NULL, "
         "command VARCHAR(50) NOT NULL, "
         "data TEXT NULL, "
+        "attempts INT NOT NULL DEFAULT 0, "
+        "last_error TEXT NULL, "
         "claimed_at TIMESTAMP NULL, "
         "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-        "INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id))"
+        "INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id), "
+        "INDEX idx_recent_command (bot_name, guild_id, command, created_at))"
     )
+    for stmt in (
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN vc_id BIGINT NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN text_channel_id BIGINT NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN command VARCHAR(50) NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN data TEXT NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN last_error TEXT NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN claimed_at TIMESTAMP NULL",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
+        f"ALTER TABLE {_q(bot_name, 'swarm_direct_orders')} ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
+    ):
+        try:
+            await cur.execute(stmt)
+        except Exception:
+            pass
 
 
-async def _insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | None, text_channel_id: int | None, command: str, data: str | None = None) -> None:
+async def _insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | None, text_channel_id: int | None, command: str, data: str | None = None, *, dedupe: bool = True) -> None:
+    command = command.upper().strip()
     await _ensure_direct_orders(cur, bot_name)
+    if dedupe:
+        await cur.execute(
+            f"DELETE FROM {_q(bot_name, 'swarm_direct_orders')} WHERE bot_name=%s AND guild_id=%s AND command=%s",
+            (bot_name, int(guild_id or 0), command),
+        )
     await cur.execute(
         f"INSERT INTO {_q(bot_name, 'swarm_direct_orders')} "
         "(bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-        (bot_name, int(guild_id or 0), vc_id, text_channel_id, command.upper(), data or ""),
+        (bot_name, int(guild_id or 0), vc_id, text_channel_id, command, data or ""),
     )
 
 

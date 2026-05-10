@@ -13,6 +13,7 @@ from core.chat_attachments import (
     prepare_chat_uploads,
 )
 from core.database import db
+from core.swarm_control import insert_direct_order
 from core.webhooks import send_error_webhook_log
 
 logger = logging.getLogger("discord")
@@ -304,15 +305,14 @@ class AICore(commands.Cog):
 
                         target_drone = active_drone or "gws"
 
-                        await cur.execute(
-                            f"CREATE TABLE IF NOT EXISTS discord_music_{target_drone}.{target_drone}_swarm_direct_orders "
-                            f"(id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, "
-                            f"vc_id BIGINT, text_channel_id BIGINT, command VARCHAR(50), data TEXT)"
-                        )
-                        await cur.execute(
-                            f"INSERT INTO discord_music_{target_drone}.{target_drone}_swarm_direct_orders "
-                            f"(bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-                            (target_drone, interaction.guild_id, target_vc, interaction.channel_id, "PLAY", search_url),
+                        await insert_direct_order(
+                            cur,
+                            target_drone,
+                            int(interaction.guild_id or 0),
+                            target_vc,
+                            interaction.channel_id,
+                            "PLAY",
+                            search_url,
                         )
 
             embed = discord.Embed(

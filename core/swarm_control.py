@@ -113,6 +113,62 @@ def is_admin_or_override(ctx) -> bool:
     return bool(perms and perms.administrator)
 
 
+async def ensure_direct_order_schema(cur, bot_name: str) -> None:
+    """Keep Aria's direct-order table compatible with every music bot build."""
+    if bot_name not in DRONE_NAMES:
+        raise ValueError(f"Unknown swarm node: {bot_name}")
+    await cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            bot_name VARCHAR(50) NOT NULL,
+            guild_id BIGINT NOT NULL,
+            vc_id BIGINT NULL,
+            text_channel_id BIGINT NULL,
+            command VARCHAR(50) NOT NULL,
+            data TEXT NULL,
+            attempts INT NOT NULL DEFAULT 0,
+            last_error TEXT NULL,
+            claimed_at TIMESTAMP NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id),
+            INDEX idx_recent_command (bot_name, guild_id, command, created_at)
+        )
+        """
+    )
+    for stmt in (
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN vc_id BIGINT NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN text_channel_id BIGINT NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN command VARCHAR(50) NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN data TEXT NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN attempts INT NOT NULL DEFAULT 0",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN last_error TEXT NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN claimed_at TIMESTAMP NULL",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
+        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
+    ):
+        try:
+            await cur.execute(stmt)
+        except Exception:
+            pass
+
+
+async def insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | None, text_channel_id: int | None, command: str, data: str | None = None, *, dedupe: bool = True) -> None:
+    command = str(command or "").upper().strip()
+    await ensure_direct_order_schema(cur, bot_name)
+    if dedupe:
+        await cur.execute(
+            f"DELETE FROM discord_music_{bot_name}.{bot_name}_swarm_direct_orders WHERE bot_name = %s AND guild_id = %s AND command = %s",
+            (bot_name, int(guild_id or 0), command),
+        )
+    await cur.execute(
+        f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
+        (bot_name, int(guild_id or 0), vc_id if vc_id else None, text_channel_id if text_channel_id else None, command, data or ""),
+    )
+
+
 async def ensure_guild_settings_schema(cur, bot_name: str) -> None:
     await cur.execute(
         f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings "
@@ -281,20 +337,14 @@ class SwarmController:
 
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, command VARCHAR(50), data TEXT)"
-                )
-                await cur.execute(
-                    f"DELETE FROM discord_music_{bot_name}.{bot_name}_swarm_direct_orders WHERE bot_name = %s AND guild_id = %s AND command = %s",
-                    (bot_name, guild_id, action),
-                )
-                await cur.execute(
-                    f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-                    # FIX: store NULL (not 0) for missing vc_id — the music bots check
-                    # truthiness of vc_id, so 0 is treated as "no channel" AND is a
-                    # valid-looking value that silently falls through to the home channel
-                    # fallback instead of routing correctly.
-                    (bot_name, guild_id, vc_id if vc_id else None, channel_id_from_ctx(ctx), action, data or ""),
+                await insert_direct_order(
+                    cur,
+                    bot_name,
+                    guild_id,
+                    vc_id if vc_id else None,
+                    channel_id_from_ctx(ctx),
+                    action,
+                    data or "",
                 )
 
         if action == "PLAY":
@@ -362,12 +412,15 @@ class SwarmController:
                     if not row or not row.get("home_vc_id"):
                         continue
 
-                    await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (id INT AUTO_INCREMENT PRIMARY KEY, bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, command VARCHAR(50), data TEXT)"
-                    )
-                    await cur.execute(
-                        f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
-                        (bot_name, guild_id, row["home_vc_id"], channel_id_from_ctx(ctx), "PLAY", payload),
+                    await insert_direct_order(
+                        cur,
+                        bot_name,
+                        guild_id,
+                        row["home_vc_id"],
+                        channel_id_from_ctx(ctx),
+                        "PLAY",
+                        payload,
+                        dedupe=False,
                     )
                     deployed += 1
 

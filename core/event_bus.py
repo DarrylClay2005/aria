@@ -387,12 +387,17 @@ class EventBus:
 
         for row in rows:
             guild_id = int(row.get("guild_id") or 0)
+            raw_track = row.get("current_track")
+            current_track = str(raw_track).strip() if raw_track is not None else ""
             state = {
                 "drone": drone,
                 "guild_id": guild_id,
                 "channel_id": row.get("channel_id"),
                 "text_channel_id": row.get("text_channel_id"),
-                "current_track": bool(row.get("current_track")),
+                # Keep the actual track/query text for Aria's doctor flow.  Older
+                # builds collapsed this to bool(...), which made queue rebuilds
+                # write `True` instead of a recoverable track/query.
+                "current_track": current_track or None,
                 "position_seconds": float(row.get("position_seconds") or 0),
                 "is_playing": bool(row.get("is_playing")),
                 "is_paused": bool(row.get("is_paused")),
