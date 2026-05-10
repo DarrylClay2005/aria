@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import random
 import re
 import warnings
 
@@ -14,6 +16,13 @@ logger = logging.getLogger("discord")
 _ORIGINAL_CREATE_POOL = aiomysql.create_pool if aiomysql else None
 warnings.filterwarnings("ignore", message=".*already exists.*", category=Warning, module=r"aiomysql\..*")
 warnings.filterwarnings("ignore", message="Can't create database .*; database exists", category=Warning, module=r"aiomysql\..*")
+
+DB_POOL_MIN_SIZE = max(1, int(os.getenv("ARIA_DB_POOL_MIN_SIZE", "1") or "1"))
+DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, int(os.getenv("ARIA_DB_POOL_MAX_SIZE", "8") or "8"))
+DB_CONNECT_TIMEOUT_SECONDS = max(3, int(os.getenv("ARIA_DB_CONNECT_TIMEOUT_SECONDS", "10") or "10"))
+DB_POOL_RECYCLE_SECONDS = max(60, int(os.getenv("ARIA_DB_POOL_RECYCLE_SECONDS", "900") or "900"))
+DB_CONNECT_ATTEMPTS = max(1, int(os.getenv("ARIA_DB_CONNECT_ATTEMPTS", "12") or "12"))
+DB_CONNECT_BASE_DELAY_SECONDS = max(1.0, float(os.getenv("ARIA_DB_CONNECT_BASE_DELAY_SECONDS", "3") or "3"))
 
 
 async def ensure_database_exists():
@@ -31,7 +40,7 @@ async def ensure_database_exists():
         user=DB_CONFIG.get("user", "botuser"),
         password=DB_CONFIG.get("password", ""),
         autocommit=True,
-        connect_timeout=10,
+        connect_timeout=DB_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         async with conn.cursor() as cur:
@@ -93,22 +102,42 @@ class DatabaseManager:
         self.pool = _SharedPoolProxy(self)
         self._connect_lock = asyncio.Lock()
 
-    async def connect(self, attempts: int = 12, delay: int = 5):
+    @property
+    def is_connected(self) -> bool:
+        return bool(self._pool and not getattr(self._pool, "closed", False))
+
+    async def connect(self, attempts: int | None = None, delay: float | None = None):
         """Initialize the global connection pool, retry-safe and legacy-safe."""
-        if self._pool:
+        attempts = DB_CONNECT_ATTEMPTS if attempts is None else max(1, int(attempts))
+        delay = DB_CONNECT_BASE_DELAY_SECONDS if delay is None else max(0.25, float(delay))
+        if self.is_connected:
             return
         async with self._connect_lock:
-            if self._pool:
+            if self.is_connected:
                 return
+            if self._pool and getattr(self._pool, "closed", False):
+                self._pool = None
             if aiomysql is None:
                 logger.error("aiomysql is not installed; database features are unavailable.")
                 return
             for attempt in range(1, attempts + 1):
                 try:
                     await ensure_database_exists()
-                    pool_config = {**DB_CONFIG, "minsize": 1, "maxsize": 15, "autocommit": True}
+                    pool_config = {
+                        **DB_CONFIG,
+                        "minsize": DB_POOL_MIN_SIZE,
+                        "maxsize": DB_POOL_MAX_SIZE,
+                        "autocommit": True,
+                        "connect_timeout": DB_CONNECT_TIMEOUT_SECONDS,
+                        "pool_recycle": DB_POOL_RECYCLE_SECONDS,
+                    }
                     self._pool = await _ORIGINAL_CREATE_POOL(**pool_config)
-                    logger.info("🟢 Global Database Pool initialized.")
+                    logger.info(
+                        "🟢 Global Database Pool initialized. min=%s max=%s recycle=%ss",
+                        DB_POOL_MIN_SIZE,
+                        DB_POOL_MAX_SIZE,
+                        DB_POOL_RECYCLE_SECONDS,
+                    )
                     return
                 except Exception as e:
                     logger.exception(
@@ -119,7 +148,8 @@ class DatabaseManager:
                     )
                     if attempt >= attempts:
                         return
-                    await asyncio.sleep(delay)
+                    backoff = min(30.0, delay * (1.5 ** (attempt - 1))) + random.uniform(0.0, 0.4)
+                    await asyncio.sleep(backoff)
 
     def patch_legacy_create_pool(self):
         """Route old aiomysql.create_pool usage to the shared pool."""

@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 import logging
 import asyncio
+import os
+import time
 from discord import app_commands
 
 # ================================
@@ -13,7 +15,7 @@ from core.override import override_manager
 from core.database import db
 from core.chat_attachments import MAX_CHAT_ATTACHMENTS, build_chat_upload_prompt, prepare_chat_uploads
 from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
-from core.webhooks import install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
+from core.webhooks import close_http_session, install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
 
 # --- LOGGING SETUP ---
@@ -37,6 +39,8 @@ class AriaBot(commands.Bot):
         self.event_bus = EventBus(self)
         self.monitor = Monitor(self, self.event_bus)
         self.monitor_task = None
+        self.aria_chat_semaphore = asyncio.Semaphore(max(1, int(os.getenv("ARIA_CHAT_CONCURRENCY", "3") or "3")))
+        self._last_ready_webhook_at = 0.0
 
     async def setup_hook(self):
         # 🟢 Boot the global DB pool BEFORE cogs load
@@ -77,7 +81,16 @@ class AriaBot(commands.Bot):
             logger.warning("Invalid ARIA_OVERRIDE_USER_ID value: %s", OVERRIDE_USER_ID)
 
     async def close(self):
-        # 🟢 Cleanly close the DB pool when the bot shuts down
+        # 🟢 Cleanly close long-lived resources when the bot shuts down.
+        if self.monitor_task and not self.monitor_task.done():
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Aria monitor task raised while shutting down.")
+        await close_http_session()
         await db.close()
         await super().close()
 
@@ -94,11 +107,15 @@ async def on_ready():
     install_error_reporting()
     install_loop_exception_handler()
     logger.info(f'🤖 Aria Intelligence Core is online and operating as {bot.user}')
-    await send_webhook_log(
-        "Aria Online",
-        f"Aria Intelligence Core is online and operating as {bot.user}.",
-        color=discord.Color.brand_green(),
-    )
+    now = time.monotonic()
+    ready_webhook_cooldown = max(30.0, float(os.getenv("ARIA_READY_WEBHOOK_COOLDOWN_SECONDS", "300") or "300"))
+    if now - bot._last_ready_webhook_at >= ready_webhook_cooldown:
+        bot._last_ready_webhook_at = now
+        await send_webhook_log(
+            "Aria Online",
+            f"Aria Intelligence Core is online and operating as {bot.user}.",
+            color=discord.Color.brand_green(),
+        )
 
     await bot.change_presence(
         activity=discord.Activity(
@@ -127,6 +144,18 @@ async def on_ready():
             else:
                 logger.info("Aria monitor task finished; recreating it after reconnect.")
         bot.monitor_task = asyncio.create_task(bot.monitor.start(), name="aria-monitor")
+
+
+async def send_discord_safely(channel, text: str, *, limit: int = 1900):
+    payload = str(text or "").strip()
+    if not payload:
+        return
+    chunks = []
+    while payload:
+        chunks.append(payload[:limit])
+        payload = payload[limit:]
+    for chunk in chunks[:6]:
+        await channel.send(chunk)
 
 
 def should_run_aria_core(message: discord.Message) -> bool:
@@ -161,10 +190,19 @@ async def on_message(message):
         if not prompt:
             prompt = "What?"
 
-        response = await bot.aria_core.handle(message, prompt)
+        try:
+            await asyncio.wait_for(bot.aria_chat_semaphore.acquire(), timeout=0.25)
+        except TimeoutError:
+            await send_discord_safely(message.channel, "I’m already handling a few Aria requests. Try again in a moment.")
+            return
+
+        try:
+            response = await bot.aria_core.handle(message, prompt)
+        finally:
+            bot.aria_chat_semaphore.release()
 
         if response:
-            await message.channel.send(response)
+            await send_discord_safely(message.channel, response)
             return
 
         selected_uploads = list(message.attachments or [])
@@ -192,7 +230,14 @@ async def on_message(message):
 
         contextual_prompt, attachment_context_note, direct_attachment = build_chat_upload_prompt(prompt, active_uploads)
         direct_attachment = direct_attachment or {}
-        reply = await bot.aria_core.chat(
+        try:
+            await asyncio.wait_for(bot.aria_chat_semaphore.acquire(), timeout=0.25)
+        except TimeoutError:
+            await send_discord_safely(message.channel, "I’m already handling a few Aria requests. Try again in a moment.")
+            return
+
+        try:
+            reply = await bot.aria_core.chat(
             contextual_prompt,
             system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
             user_id=message.author.id,
@@ -204,11 +249,13 @@ async def on_message(message):
             attachment_name=direct_attachment.get("attachment_name"),
             attachment_mime_type=direct_attachment.get("attachment_mime_type"),
             attachment_context_note=attachment_context_note,
-        )
-        await message.channel.send(reply)
+            )
+        finally:
+            bot.aria_chat_semaphore.release()
+        await send_discord_safely(message.channel, reply)
 
     except ValueError as e:
-        await message.channel.send(str(e))
+        await send_discord_safely(message.channel, str(e))
     except Exception as e:
         logger.exception("[ARIA ERROR] %s", e)
         await send_error_webhook_log("Aria Message Handler Error", str(e), traceback_text="".join(__import__("traceback").format_exception(type(e), e, e.__traceback__)))

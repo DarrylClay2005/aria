@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 try:
@@ -46,6 +47,9 @@ class EventBus:
             30.0,
             float(os.getenv("ARIA_PLAYBACK_DRIFT_MIN_AGE_SECONDS", "90") or "90"),
         )
+        self._sync_lock = asyncio.Lock()
+        self._column_cache: dict[tuple[str, str], tuple[float, set[str]]] = {}
+        self._column_cache_ttl_seconds = max(30.0, float(os.getenv("ARIA_EVENTBUS_COLUMN_CACHE_TTL_SECONDS", "300") or "300"))
 
     @staticmethod
     def _dict_cursor():
@@ -133,6 +137,11 @@ class EventBus:
         )
 
     async def _table_columns(self, cur, schema: str, table: str) -> set[str]:
+        cache_key = (str(schema), str(table))
+        now = time.monotonic()
+        cached = self._column_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return set(cached[1])
         await cur.execute(
             """
             SELECT COLUMN_NAME
@@ -148,6 +157,7 @@ class EventBus:
                 cols.add(str(row.get("COLUMN_NAME") or row.get("column_name") or ""))
             else:
                 cols.add(str(row[0]))
+        self._column_cache[cache_key] = (now + self._column_cache_ttl_seconds, set(cols))
         return cols
 
     async def _playback_sync_query(self, cur, drone: str) -> str:
@@ -526,11 +536,15 @@ class EventBus:
     async def sync_swarm_sources(self) -> None:
         if not db.pool:
             return
-        async with db.pool.acquire() as conn:
-            async with conn.cursor(self._dict_cursor()) as cur:
-                for drone in DRONE_NAMES:
-                    await self._sync_bot_state(cur, drone)
-                    await self._sync_bot_errors(cur, drone)
+        if self._sync_lock.locked():
+            logger.warning("Skipping overlapping swarm-source sync cycle.")
+            return
+        async with self._sync_lock:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(self._dict_cursor()) as cur:
+                    for drone in DRONE_NAMES:
+                        await self._sync_bot_state(cur, drone)
+                        await self._sync_bot_errors(cur, drone)
 
     async def claim_events(self, *, limit: int = 50) -> list[dict[str, Any]]:
         if not db.pool:

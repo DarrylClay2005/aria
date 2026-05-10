@@ -20,6 +20,13 @@ class Monitor:
             30.0,
             float(os.getenv("ARIA_OPS_EVENT_COOLDOWN_SECONDS", "120") or "120"),
         )
+        self._sync_timeout_seconds = max(5.0, float(os.getenv("ARIA_MONITOR_SYNC_TIMEOUT_SECONDS", "35") or "35"))
+        self._repair_timeout_seconds = max(5.0, float(os.getenv("ARIA_MONITOR_REPAIR_TIMEOUT_SECONDS", "30") or "30"))
+        self._infra_timeout_seconds = max(5.0, float(os.getenv("ARIA_MONITOR_INFRA_TIMEOUT_SECONDS", "30") or "30"))
+        self._event_claim_timeout_seconds = max(3.0, float(os.getenv("ARIA_MONITOR_EVENT_CLAIM_TIMEOUT_SECONDS", "12") or "12"))
+        self._event_handler_timeout_seconds = max(5.0, float(os.getenv("ARIA_MONITOR_EVENT_HANDLER_TIMEOUT_SECONDS", "45") or "45"))
+        self._ops_webhook_timeout_seconds = max(3.0, float(os.getenv("ARIA_MONITOR_OPS_WEBHOOK_TIMEOUT_SECONDS", "12") or "12"))
+        self._full_scan_timeout_seconds = max(10.0, float(os.getenv("ARIA_MONITOR_FULL_SCAN_TIMEOUT_SECONDS", "75") or "75"))
 
     @staticmethod
     def _trim(value, limit: int = 900) -> str:
@@ -168,15 +175,19 @@ class Monitor:
         from core.webhooks import send_error_webhook_log, send_ops_webhook_log
         while True:
             try:
-                await self.bus.sync_swarm_sources()
+                await asyncio.wait_for(self.bus.sync_swarm_sources(), timeout=self._sync_timeout_seconds)
                 if override_manager.autonomy_enabled:
-                    await self.engine.run_pending_repairs()
-                    await self.engine.run_pending_infra_tasks()
-                    for event in await self.bus.claim_events(limit=50):
+                    await asyncio.wait_for(self.engine.run_pending_repairs(), timeout=self._repair_timeout_seconds)
+                    await asyncio.wait_for(self.engine.run_pending_infra_tasks(), timeout=self._infra_timeout_seconds)
+                    events = await asyncio.wait_for(self.bus.claim_events(limit=50), timeout=self._event_claim_timeout_seconds)
+                    for event in events:
                         handled = False
                         error_text = None
                         try:
-                            handled = await self.engine.handle_event(event)
+                            handled = await asyncio.wait_for(
+                                self.engine.handle_event(event),
+                                timeout=self._event_handler_timeout_seconds,
+                            )
                         except Exception as exc:
                             error_text = f"{type(exc).__name__}: {exc}"
                             logger.exception("[Monitor] Failed to handle swarm event %s.", event.get("id"))
@@ -203,15 +214,20 @@ class Monitor:
                                         error_text,
                                         repeat_count,
                                     )
-                                    await send_ops_webhook_log(title, desc, color=color, fields=fields)
+                                    await asyncio.wait_for(
+                                        send_ops_webhook_log(title, desc, color=color, fields=fields),
+                                        timeout=self._ops_webhook_timeout_seconds,
+                                    )
                         except Exception as wh_exc:
                             logger.warning(f"[Monitor] Failed to send ops webhook: {wh_exc}")
                         finally:
                             await self.bus.mark_processed(event["id"])
                     now = asyncio.get_running_loop().time()
                     if now - self._last_full_scan >= 8.0:
-                        await self.engine.run_once()
+                        await asyncio.wait_for(self.engine.run_once(), timeout=self._full_scan_timeout_seconds)
                         self._last_full_scan = now
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("[Monitor] Unhandled error in autonomous engine run.")
             await asyncio.sleep(2)

@@ -13,6 +13,9 @@ logger = logging.getLogger("discord")
 BOT_NAME = "aria"
 _INSTALLED_ERROR_HANDLERS = []
 _DISABLED_WEBHOOK_URLS = set()
+HTTP_TIMEOUT_SECONDS = max(5.0, float(os.getenv("ARIA_WEBHOOK_HTTP_TIMEOUT_SECONDS", "12") or "12"))
+WEBHOOK_SEND_TIMEOUT_SECONDS = max(5.0, float(os.getenv("ARIA_WEBHOOK_SEND_TIMEOUT_SECONDS", "15") or "15"))
+WEBHOOK_CONNECTOR_LIMIT = max(2, int(os.getenv("ARIA_WEBHOOK_CONNECTOR_LIMIT", "8") or "8"))
 
 
 def _env_first(*names: str) -> str:
@@ -47,14 +50,25 @@ OPS_WEBHOOK_URL = _env_first(
 
 class HTTPSessionManager:
     _session = None
+    _connector = None
 
     async def __aenter__(self):
         if not HTTPSessionManager._session or HTTPSessionManager._session.closed:
-            HTTPSessionManager._session = aiohttp.ClientSession()
+            HTTPSessionManager._connector = aiohttp.TCPConnector(limit=WEBHOOK_CONNECTOR_LIMIT, ttl_dns_cache=300)
+            timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS, connect=min(5.0, HTTP_TIMEOUT_SECONDS))
+            HTTPSessionManager._session = aiohttp.ClientSession(timeout=timeout, connector=HTTPSessionManager._connector)
         return HTTPSessionManager._session
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return False
+
+
+async def close_http_session():
+    session = HTTPSessionManager._session
+    HTTPSessionManager._session = None
+    HTTPSessionManager._connector = None
+    if session and not session.closed:
+        await session.close()
 
 
 def _trim(text, limit):
@@ -128,7 +142,10 @@ async def _send_embed_to_url(url: str, *, title, description, color, retries=3, 
                 if fields:
                     for name, value, inline in fields[:20]:
                         embed.add_field(name=_trim(name, 256), value=_trim(value, 1024) or "—", inline=bool(inline))
-                await webhook.send(embed=embed, username=_trim(username, 80) or "Aria")
+                await asyncio.wait_for(
+                    webhook.send(embed=embed, username=_trim(username, 80) or "Aria"),
+                    timeout=WEBHOOK_SEND_TIMEOUT_SECONDS,
+                )
                 return True
         except Exception as exc:
             if _is_unknown_webhook(exc):
@@ -195,7 +212,10 @@ async def send_error_webhook_log(title, description, color=None, retries=3, fiel
                         embed.add_field(name=_trim(name, 256), value=_trim(value, 1024), inline=inline)
                 if traceback_text:
                     embed.add_field(name="Traceback", value="```py\n{}\n```".format(_trim(traceback_text, 900)), inline=False)
-                await webhook.send(embed=embed, username="Error Node: Aria")
+                await asyncio.wait_for(
+                    webhook.send(embed=embed, username="Error Node: Aria"),
+                    timeout=WEBHOOK_SEND_TIMEOUT_SECONDS,
+                )
                 return
         except Exception as exc:
             if _is_unknown_webhook(exc):
