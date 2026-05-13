@@ -61,6 +61,17 @@ class IntentParser:
         if re.fullmatch(r"wrapped", lowered):
             return {"action": "swarm_wrapped"}
 
+        match = re.fullmatch(rf"(?:music\s+)?(?:intel|intelligence|taste|memory)(?:\s+({DRONE_PATTERN}|all|swarm))?", lowered)
+        if match:
+            drone = match.group(1)
+            if drone in ALL_SCOPE_MARKERS:
+                drone = None
+            return {"action": "swarm_intelligence", "data": {"drone": drone}}
+
+        match = re.fullmatch(rf"(?:smart\s+)?recommend(?:ation)?(?:\s+(?:from|for|on|using|via))?\s*({DRONE_PATTERN})?", lowered)
+        if match:
+            return {"action": "swarm_smart_recommend", "data": {"drone": match.group(1)}}
+
         match = re.fullmatch(rf"undo\s+({DRONE_PATTERN})", lowered)
         if match:
             return {"action": "swarm_undo", "data": {"drone": match.group(1)}}

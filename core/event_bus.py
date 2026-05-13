@@ -29,6 +29,9 @@ BOT_SCHEMAS = {
         "playback": f"{drone}_playback_state",
         "home": f"{drone}_bot_home_channels",
         "errors": f"{drone}_error_events",
+        "intelligence": f"{drone}_track_intelligence",
+        "affinity": f"{drone}_user_track_affinity",
+        "recommendations": f"{drone}_smart_recommendations",
     }
     for drone in DRONE_NAMES
 }
@@ -570,6 +573,52 @@ class EventBus:
         if max_seen != last_id:
             await self._set_cursor(cur, cursor_key, str(max_seen))
 
+    async def _sync_music_intelligence(self, cur, drone: str) -> None:
+        cfg = BOT_SCHEMAS[drone]
+        cursor_key = f"smartrec:{drone}:last_id"
+        last_id = int(await self._get_cursor(cur, cursor_key, default="0"))
+        try:
+            await cur.execute(
+                f"""
+                SELECT id, guild_id, requester_id, seed_title, seed_url, query_text, chosen_url, chosen_title, reason, accepted, created_at
+                FROM {cfg['schema']}.{cfg['recommendations']}
+                WHERE id > %s
+                ORDER BY id ASC
+                LIMIT 100
+                """,
+                (last_id,),
+            )
+            rows = await cur.fetchall() or []
+        except Exception:
+            return
+
+        max_seen = last_id
+        for row in rows:
+            event_id = int(row.get("id") or 0)
+            max_seen = max(max_seen, event_id)
+            guild_id = int(row.get("guild_id") or 0)
+            await self.emit_event(
+                event_type="smart_recommendation_logged",
+                source_system="music_intelligence",
+                bot_name=drone,
+                guild_id=guild_id or None,
+                severity="info",
+                payload={
+                    "requester_id": row.get("requester_id"),
+                    "seed_title": row.get("seed_title"),
+                    "seed_url": row.get("seed_url"),
+                    "query_text": row.get("query_text"),
+                    "chosen_url": row.get("chosen_url"),
+                    "chosen_title": row.get("chosen_title"),
+                    "reason": row.get("reason"),
+                    "accepted": bool(row.get("accepted")),
+                    "created_at": str(row.get("created_at")),
+                },
+                dedupe_key=f"smartrec:{drone}:{event_id}",
+            )
+        if max_seen != last_id:
+            await self._set_cursor(cur, cursor_key, str(max_seen))
+
     async def sync_swarm_sources(self) -> None:
         if not db.pool:
             return
@@ -582,6 +631,7 @@ class EventBus:
                     for drone in DRONE_NAMES:
                         await self._sync_bot_state(cur, drone)
                         await self._sync_bot_errors(cur, drone)
+                        await self._sync_music_intelligence(cur, drone)
 
     async def claim_events(self, *, limit: int = 50) -> list[dict[str, Any]]:
         if not db.pool:

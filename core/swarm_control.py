@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from typing import Any
 
 try:
     import aiomysql
@@ -46,6 +47,8 @@ GUILD_SETTINGS_COLUMNS = (
 SCHEMA_CACHE_RECHECK_SECONDS = max(30.0, float(os.getenv("ARIA_SWARM_SCHEMA_RECHECK_SECONDS", "300") or "300"))
 ACTIVE_DRONE_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ARIA_ACTIVE_DRONE_CACHE_TTL_SECONDS", "5") or "5"))
 HOME_CHANNEL_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ARIA_HOME_CHANNEL_CACHE_TTL_SECONDS", "15") or "15"))
+MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("ARIA_MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS", "30") or "30"))
+SMART_TITLE_NOISE_RE = re.compile(r"\s*[\[(][^\])]*(?:official|lyrics?|audio|video|visualizer|remaster|sped up|slowed)[^\])]*[\])]\s*", re.IGNORECASE)
 
 _direct_order_schema_ready: set[str] = set()
 _direct_order_schema_retry_after: dict[str, float] = {}
@@ -53,8 +56,12 @@ _direct_order_schema_locks: dict[str, asyncio.Lock] = {}
 _guild_settings_schema_ready: set[str] = set()
 _guild_settings_schema_retry_after: dict[str, float] = {}
 _guild_settings_schema_locks: dict[str, asyncio.Lock] = {}
+_music_intelligence_schema_ready: set[str] = set()
+_music_intelligence_schema_retry_after: dict[str, float] = {}
+_music_intelligence_schema_locks: dict[str, asyncio.Lock] = {}
 _active_drones_cache: dict[int, tuple[float, list[str]]] = {}
 _home_channel_cache: dict[tuple[int, str], tuple[float, int | None]] = {}
+_music_intelligence_cache: dict[tuple[int, str | None], tuple[float, dict[str, Any]]] = {}
 
 
 def _schema_lock(locks: dict[str, asyncio.Lock], bot_name: str) -> asyncio.Lock:
@@ -69,11 +76,14 @@ def invalidate_swarm_route_cache(guild_id: int | None = None) -> None:
     if guild_id is None:
         _active_drones_cache.clear()
         _home_channel_cache.clear()
+        _music_intelligence_cache.clear()
         return
     guild_key = int(guild_id)
     _active_drones_cache.pop(guild_key, None)
     for cache_key in [key for key in _home_channel_cache if key[0] == guild_key]:
         _home_channel_cache.pop(cache_key, None)
+    for cache_key in [key for key in _music_intelligence_cache if key[0] == guild_key]:
+        _music_intelligence_cache.pop(cache_key, None)
 
 
 def normalize_drone_name(name: str | None) -> str | None:
@@ -99,6 +109,13 @@ def extract_channel_id(text: str) -> int | None:
         return int(match.group(1))
     bare_digits = re.search(r"\b(\d{15,22})\b", text)
     return int(bare_digits.group(1)) if bare_digits else None
+
+
+def smart_query_from_title(title: str | None) -> str:
+    cleaned = re.sub(r"https?://\S+", "", str(title or ""))
+    cleaned = SMART_TITLE_NOISE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|")
+    return cleaned[:180] or str(title or "").strip()[:180]
 
 
 def resolve_bot(ctx):
@@ -253,6 +270,63 @@ async def _ensure_guild_settings_schema_uncached(cur, bot_name: str) -> None:
                 f"ALTER TABLE discord_music_{bot_name}.{bot_name}_guild_settings "
                 f"ADD COLUMN {column_name} {definition}"
             )
+        except Exception:
+            pass
+
+
+async def ensure_music_intelligence_schema(cur, bot_name: str) -> None:
+    if bot_name not in DRONE_NAMES:
+        raise ValueError(f"Unknown swarm node: {bot_name}")
+    if bot_name in _music_intelligence_schema_ready:
+        return
+    now = time.monotonic()
+    if _music_intelligence_schema_retry_after.get(bot_name, 0.0) > now:
+        return
+    async with _schema_lock(_music_intelligence_schema_locks, bot_name):
+        if bot_name in _music_intelligence_schema_ready:
+            return
+        try:
+            await _ensure_music_intelligence_schema_uncached(cur, bot_name)
+        except Exception:
+            _music_intelligence_schema_retry_after[bot_name] = time.monotonic() + SCHEMA_CACHE_RECHECK_SECONDS
+            raise
+        _music_intelligence_schema_ready.add(bot_name)
+        _music_intelligence_schema_retry_after.pop(bot_name, None)
+
+
+async def _ensure_music_intelligence_schema_uncached(cur, bot_name: str) -> None:
+    schema = f"discord_music_{bot_name}"
+    await cur.execute(
+        f"CREATE TABLE IF NOT EXISTS {schema}.{bot_name}_track_intelligence ("
+        "guild_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, "
+        "queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, "
+        "skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, "
+        "total_listen_seconds INT NOT NULL DEFAULT 0, last_requester_id BIGINT DEFAULT NULL, source VARCHAR(40) DEFAULT 'unknown', "
+        "first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_queued TIMESTAMP NULL DEFAULT NULL, last_played TIMESTAMP NULL DEFAULT NULL, "
+        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, url_key))"
+    )
+    await cur.execute(
+        f"CREATE TABLE IF NOT EXISTS {schema}.{bot_name}_user_track_affinity ("
+        "guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, "
+        "queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, "
+        "skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, "
+        "score FLOAT NOT NULL DEFAULT 0, last_requested TIMESTAMP NULL DEFAULT NULL, "
+        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, user_id, url_key))"
+    )
+    await cur.execute(
+        f"CREATE TABLE IF NOT EXISTS {schema}.{bot_name}_smart_recommendations ("
+        "id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT NOT NULL, requester_id BIGINT DEFAULT NULL, "
+        "seed_title TEXT, seed_url TEXT, query_text TEXT, chosen_url TEXT, chosen_title TEXT, "
+        "reason VARCHAR(80), accepted BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    for stmt in (
+        f"CREATE INDEX {bot_name}_track_intelligence_recent_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_played)",
+        f"CREATE INDEX {bot_name}_track_intelligence_requester_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_requester_id, last_played)",
+        f"CREATE INDEX {bot_name}_user_affinity_recent_idx ON {schema}.{bot_name}_user_track_affinity (guild_id, user_id, last_requested)",
+        f"CREATE INDEX {bot_name}_smart_recommendations_recent_idx ON {schema}.{bot_name}_smart_recommendations (guild_id, created_at)",
+    ):
+        try:
+            await cur.execute(stmt)
         except Exception:
             pass
 
@@ -600,6 +674,195 @@ class SwarmController:
         if not rows:
             return f"`{bot_name}` has nothing queued right now."
         return "\n".join([f"{index}. {row['title']}" for index, row in enumerate(rows, 1)])
+
+    async def _music_intelligence_snapshot(self, guild_id: int, *, drone: str | None = None) -> dict[str, Any]:
+        cache_key = (int(guild_id or 0), normalize_drone_name(drone))
+        now = time.monotonic()
+        cached = _music_intelligence_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+
+        targets = [cache_key[1]] if cache_key[1] else list(DRONE_NAMES)
+        bots: list[dict[str, Any]] = []
+        totals = {
+            "learned_tracks": 0,
+            "plays": 0,
+            "finishes": 0,
+            "skips": 0,
+            "likes": 0,
+            "dislikes": 0,
+            "recommendations": 0,
+        }
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(self._dict_cursor()) as cur:
+                for bot_name in targets:
+                    try:
+                        await ensure_music_intelligence_schema(cur, bot_name)
+                        await cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS learned_tracks,
+                                   COALESCE(SUM(play_count), 0) AS plays,
+                                   COALESCE(SUM(finish_count), 0) AS finishes,
+                                   COALESCE(SUM(skip_count), 0) AS skips,
+                                   COALESCE(SUM(like_count), 0) AS likes,
+                                   COALESCE(SUM(dislike_count), 0) AS dislikes
+                            FROM discord_music_{bot_name}.{bot_name}_track_intelligence
+                            WHERE guild_id = %s
+                            """,
+                            (guild_id,),
+                        )
+                        summary = await cur.fetchone() or {}
+                        await cur.execute(
+                            f"""
+                            SELECT title, video_url, play_count, finish_count, skip_count, like_count, dislike_count,
+                                   ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score
+                            FROM discord_music_{bot_name}.{bot_name}_track_intelligence
+                            WHERE guild_id = %s
+                            ORDER BY smart_score DESC, updated_at DESC
+                            LIMIT 3
+                            """,
+                            (guild_id,),
+                        )
+                        top_tracks = await cur.fetchall() or []
+                        await cur.execute(
+                            f"""
+                            SELECT user_id, COUNT(*) AS track_count, COALESCE(SUM(score), 0) AS taste_score,
+                                   COALESCE(SUM(like_count), 0) AS likes, COALESCE(SUM(dislike_count), 0) AS dislikes
+                            FROM discord_music_{bot_name}.{bot_name}_user_track_affinity
+                            WHERE guild_id = %s
+                            GROUP BY user_id
+                            ORDER BY taste_score DESC, likes DESC
+                            LIMIT 3
+                            """,
+                            (guild_id,),
+                        )
+                        top_users = await cur.fetchall() or []
+                        await cur.execute(
+                            f"SELECT COUNT(*) AS recommendation_count, MAX(created_at) AS last_recommended FROM discord_music_{bot_name}.{bot_name}_smart_recommendations WHERE guild_id = %s",
+                            (guild_id,),
+                        )
+                        rec_row = await cur.fetchone() or {}
+                    except Exception:
+                        continue
+
+                    item = {
+                        "bot": bot_name,
+                        "summary": summary,
+                        "top_tracks": list(top_tracks),
+                        "top_users": list(top_users),
+                        "recommendations": int(rec_row.get("recommendation_count") or 0),
+                        "last_recommended": rec_row.get("last_recommended"),
+                    }
+                    bots.append(item)
+                    totals["learned_tracks"] += int(summary.get("learned_tracks") or 0)
+                    totals["plays"] += int(summary.get("plays") or 0)
+                    totals["finishes"] += int(summary.get("finishes") or 0)
+                    totals["skips"] += int(summary.get("skips") or 0)
+                    totals["likes"] += int(summary.get("likes") or 0)
+                    totals["dislikes"] += int(summary.get("dislikes") or 0)
+                    totals["recommendations"] += int(item["recommendations"] or 0)
+
+        snapshot = {"guild_id": int(guild_id), "bots": bots, "totals": totals}
+        _music_intelligence_cache[cache_key] = (time.monotonic() + MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS, snapshot)
+        return snapshot
+
+    async def music_intelligence(self, ctx, *, drone: str | None = None) -> str:
+        guild_id = guild_id_from_ctx(ctx)
+        if not guild_id:
+            return "I need a server to inspect swarm music intelligence."
+        if not db.pool:
+            return "My swarm database link is offline right now."
+
+        snapshot = await self._music_intelligence_snapshot(int(guild_id), drone=drone)
+        if not snapshot["bots"]:
+            return "I can see the smart music tables, but there is not enough learned taste data here yet."
+
+        totals = snapshot["totals"]
+        lines = [
+            f"Smart music memory: {totals['learned_tracks']} learned tracks, {totals['likes']} likes, {totals['dislikes']} dislikes, {totals['recommendations']} recommendations."
+        ]
+        for bot in snapshot["bots"][:5]:
+            summary = bot["summary"]
+            top = bot["top_tracks"][0] if bot["top_tracks"] else None
+            top_title = str(top.get("title") or "no favorite yet")[:90] if top else "no favorite yet"
+            lines.append(
+                f"`{bot['bot']}`: {int(summary.get('learned_tracks') or 0)} tracks, "
+                f"{int(summary.get('plays') or 0)} plays, top seed `{top_title}`."
+            )
+        return "\n".join(lines)[:1900]
+
+    async def smart_recommend(self, ctx, *, drone: str | None = None) -> str:
+        guild_id = guild_id_from_ctx(ctx)
+        if not guild_id:
+            return "I need a server before I can make a smart recommendation."
+        if not db.pool:
+            return "My swarm database link is offline right now."
+
+        actor = actor_from_ctx(ctx)
+        requester_id = getattr(actor, "id", None)
+        target_drone, target_vc_id = await self.resolve_play_target(guild_id, drone, voice_channel_id_from_ctx(ctx))
+        if not target_vc_id:
+            return "Join a voice channel first or set a home channel for the target bot."
+
+        seed = None
+        reason = "server_favorite"
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(self._dict_cursor()) as cur:
+                await ensure_music_intelligence_schema(cur, target_drone)
+                if requester_id:
+                    await cur.execute(
+                        f"""
+                        SELECT title, video_url, score, like_count, dislike_count
+                        FROM discord_music_{target_drone}.{target_drone}_user_track_affinity
+                        WHERE guild_id = %s AND user_id = %s AND dislike_count <= like_count
+                        ORDER BY score DESC, last_requested DESC
+                        LIMIT 1
+                        """,
+                        (guild_id, requester_id),
+                    )
+                    seed = await cur.fetchone()
+                    if seed:
+                        reason = "personal_taste"
+                if not seed:
+                    await cur.execute(
+                        f"""
+                        SELECT title, video_url,
+                               ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS score
+                        FROM discord_music_{target_drone}.{target_drone}_track_intelligence
+                        WHERE guild_id = %s AND dislike_count <= like_count
+                        ORDER BY score DESC, updated_at DESC
+                        LIMIT 1
+                        """,
+                        (guild_id,),
+                    )
+                    seed = await cur.fetchone()
+                if not seed:
+                    return f"`{target_drone}` has smart tables ready, but no usable seeds for this server yet."
+
+                seed_title = str(seed.get("title") or seed.get("video_url") or "").strip()
+                query_text = smart_query_from_title(seed_title)
+                payload = self.normalize_query(f"{query_text} radio")
+                await cur.execute(
+                    f"""
+                    INSERT INTO discord_music_{target_drone}.{target_drone}_smart_recommendations
+                    (guild_id, requester_id, seed_title, seed_url, query_text, chosen_url, chosen_title, reason)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        guild_id,
+                        requester_id,
+                        seed_title,
+                        seed.get("video_url"),
+                        payload,
+                        None,
+                        None,
+                        reason,
+                    ),
+                )
+
+        invalidate_swarm_route_cache(guild_id)
+        result = await self.direct(ctx, target_drone, "PLAY", payload, target_vc_id=target_vc_id)
+        return f"{result}\nSmart seed: `{seed_title[:120]}` ({reason.replace('_', ' ')})."
 
     async def shuffle(self, ctx, *, drone: str | None = None) -> str:
         if not is_admin_or_override(ctx):

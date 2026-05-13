@@ -50,6 +50,14 @@ async def swarm_radar(ctx, intent):
 async def swarm_wrapped(ctx, intent):
     return await swarm_controller.wrapped(ctx)
 
+@router.register("swarm_intelligence")
+async def swarm_intelligence(ctx, intent):
+    return await swarm_controller.music_intelligence(ctx, drone=intent.get("data", {}).get("drone"))
+
+@router.register("swarm_smart_recommend")
+async def swarm_smart_recommend(ctx, intent):
+    return await swarm_controller.smart_recommend(ctx, drone=intent.get("data", {}).get("drone"))
+
 @router.register("swarm_queue")
 async def swarm_queue(ctx, intent):
     return await swarm_controller.queue_view(ctx, drone=intent.get("data", {}).get("drone"))

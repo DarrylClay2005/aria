@@ -7,7 +7,7 @@ import random
 from typing import Any
 
 from core.database import db
-from core.swarm_control import ensure_guild_settings_schema
+from core.swarm_control import ensure_guild_settings_schema, ensure_music_intelligence_schema, smart_query_from_title
 from core.webhooks import send_webhook_log
 
 logger = logging.getLogger("discord")
@@ -275,7 +275,10 @@ class SwarmAdmin(commands.Cog):
                                 lines.append(f"❌ `{b}` database missing: `{_db_name(b)}`")
                                 continue
                             pieces = []
-                            for suffix in ("playback_state", "queue", "swarm_overrides", "swarm_direct_orders", "bot_home_channels"):
+                            for suffix in (
+                                "playback_state", "queue", "swarm_overrides", "swarm_direct_orders", "bot_home_channels",
+                                "track_intelligence", "user_track_affinity", "smart_recommendations",
+                            ):
                                 pieces.append(f"{suffix}:{'yes' if await _table_exists(cur, b, suffix) else 'no'}")
                             lines.append(f"✅ `{b}` " + ", ".join(pieces))
                         except Exception as exc:
@@ -460,6 +463,147 @@ class SwarmAdmin(commands.Cog):
             await interaction.followup.send(embed=discord.Embed(title="📊 Server Wrapped: Top Swarm Tracks", description=desc, color=discord.Color.gold()))
         except Exception as e:
             await interaction.followup.send(f"❌ Analytics Error: {e}")
+
+    @swarm_group.command(name="intelligence", description="Summarize smart music memory learned by the swarm for this server.")
+    @app_commands.choices(drone=DRONES)
+    async def intelligence(self, interaction: discord.Interaction, drone: app_commands.Choice[str] = None):
+        await interaction.response.defer(ephemeral=True)
+        if not getattr(db, "pool", None):
+            return await interaction.followup.send("❌ DB pool is missing. Aria cannot inspect music intelligence.")
+        bots = [drone.value] if drone else DRONE_NAMES
+        embed = discord.Embed(title="🧠 Swarm Music Intelligence", color=discord.Color.purple())
+        total_tracks = total_likes = total_dislikes = total_recs = 0
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in bots:
+                        try:
+                            await ensure_music_intelligence_schema(cur, b)
+                            await cur.execute(
+                                f"""
+                                SELECT COUNT(*) AS learned_tracks,
+                                       COALESCE(SUM(play_count), 0) AS plays,
+                                       COALESCE(SUM(like_count), 0) AS likes,
+                                       COALESCE(SUM(dislike_count), 0) AS dislikes
+                                FROM {_q(b, 'track_intelligence')}
+                                WHERE guild_id = %s
+                                """,
+                                (interaction.guild_id,),
+                            )
+                            summary = await cur.fetchone() or {}
+                            await cur.execute(
+                                f"""
+                                SELECT title,
+                                       ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score
+                                FROM {_q(b, 'track_intelligence')}
+                                WHERE guild_id = %s
+                                ORDER BY smart_score DESC, updated_at DESC
+                                LIMIT 1
+                                """,
+                                (interaction.guild_id,),
+                            )
+                            top = await cur.fetchone()
+                            await cur.execute(
+                                f"SELECT COUNT(*) AS recs FROM {_q(b, 'smart_recommendations')} WHERE guild_id = %s",
+                                (interaction.guild_id,),
+                            )
+                            rec_row = await cur.fetchone() or {}
+                        except Exception as exc:
+                            logger.debug("Music intelligence read failed for %s: %s", b, exc)
+                            continue
+                        learned = int(summary.get("learned_tracks") or 0)
+                        likes = int(summary.get("likes") or 0)
+                        dislikes = int(summary.get("dislikes") or 0)
+                        recs = int(rec_row.get("recs") or 0)
+                        total_tracks += learned
+                        total_likes += likes
+                        total_dislikes += dislikes
+                        total_recs += recs
+                        top_title = str((top or {}).get("title") or "No confident seed yet")[:120]
+                        embed.add_field(
+                            name=b.capitalize(),
+                            value=(
+                                f"Learned: `{learned}` | Plays: `{int(summary.get('plays') or 0)}`"
+                                f"\nLikes/Dislikes: `{likes}` / `{dislikes}` | Recs: `{recs}`"
+                                f"\nTop seed: `{top_title}`"
+                            ),
+                            inline=False,
+                        )
+            if not embed.fields:
+                return await interaction.followup.send("Aria can reach the smart tables, but no node has learned taste rows for this server yet.")
+            embed.set_footer(text=f"Total learned tracks: {total_tracks} | likes: {total_likes} | dislikes: {total_dislikes} | recommendations: {total_recs}")
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Intelligence scan failed: {e}")
+
+    @swarm_group.command(name="recommend", description="Use learned taste data to queue a smart recommendation through a swarm node.")
+    @app_commands.choices(drone=DRONES)
+    async def recommend(self, interaction: discord.Interaction, drone: app_commands.Choice[str] = None):
+        await interaction.response.defer(ephemeral=True)
+        if not getattr(db, "pool", None):
+            return await interaction.followup.send("❌ DB pool is missing. Aria cannot recommend music.")
+        requester_id = interaction.user.id if interaction.user else None
+        voice = interaction.user.voice.channel if interaction.user and interaction.user.voice and interaction.user.voice.channel else None
+        bots = [drone.value] if drone else DRONE_NAMES
+        chosen = None
+        try:
+            async with db.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    for b in bots:
+                        await ensure_music_intelligence_schema(cur, b)
+                        seed = None
+                        reason = "server_favorite"
+                        if requester_id:
+                            await cur.execute(
+                                f"""
+                                SELECT title, video_url, score
+                                FROM {_q(b, 'user_track_affinity')}
+                                WHERE guild_id = %s AND user_id = %s AND dislike_count <= like_count
+                                ORDER BY score DESC, last_requested DESC
+                                LIMIT 1
+                                """,
+                                (interaction.guild_id, requester_id),
+                            )
+                            seed = await cur.fetchone()
+                            if seed:
+                                reason = "personal_taste"
+                        if not seed:
+                            await cur.execute(
+                                f"""
+                                SELECT title, video_url,
+                                       ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS score
+                                FROM {_q(b, 'track_intelligence')}
+                                WHERE guild_id = %s AND dislike_count <= like_count
+                                ORDER BY score DESC, updated_at DESC
+                                LIMIT 1
+                                """,
+                                (interaction.guild_id,),
+                            )
+                            seed = await cur.fetchone()
+                        if not seed:
+                            continue
+                        vc_id = voice.id if voice else await _home_channel(cur, b, int(interaction.guild_id or 0))
+                        if not vc_id:
+                            continue
+                        seed_title = str(seed.get("title") or seed.get("video_url") or "").strip()
+                        payload = f"ytmsearch:{smart_query_from_title(seed_title)} radio"
+                        await _insert_direct_order(cur, b, int(interaction.guild_id or 0), vc_id, interaction.channel_id, "PLAY", payload)
+                        await cur.execute(
+                            f"""
+                            INSERT INTO {_q(b, 'smart_recommendations')}
+                            (guild_id, requester_id, seed_title, seed_url, query_text, reason)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            """,
+                            (interaction.guild_id, requester_id, seed_title, seed.get("video_url"), payload, reason),
+                        )
+                        chosen = (b, seed_title, reason)
+                        break
+                    await conn.commit()
+            if not chosen:
+                return await interaction.followup.send("No usable smart seed and voice/home channel pair was found yet.")
+            await interaction.followup.send(f"🧠 Queued a smart recommendation through `{chosen[0]}` using `{chosen[1][:120]}` ({chosen[2].replace('_', ' ')}).")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Recommendation failed: {e}")
 
     @swarm_group.command(name="loop", description="Change the loop mode for one bot or the whole swarm.")
     @app_commands.choices(drone=DRONES)

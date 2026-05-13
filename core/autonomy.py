@@ -32,6 +32,9 @@ BOT_SCHEMAS = {
         "direct": f"{drone}_swarm_direct_orders",
         "override": f"{drone}_swarm_overrides",
         "errors": f"{drone}_error_events",
+        "intelligence": f"{drone}_track_intelligence",
+        "affinity": f"{drone}_user_track_affinity",
+        "recommendations": f"{drone}_smart_recommendations",
     }
     for drone in DRONE_NAMES
 }
@@ -1157,6 +1160,15 @@ class AutonomousEngine:
         await cur.execute(
             f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['override']} (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL, PRIMARY KEY(guild_id, bot_name))"
         )
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['intelligence']} (guild_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, total_listen_seconds INT NOT NULL DEFAULT 0, last_requester_id BIGINT DEFAULT NULL, source VARCHAR(40) DEFAULT 'unknown', first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_queued TIMESTAMP NULL DEFAULT NULL, last_played TIMESTAMP NULL DEFAULT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, url_key))"
+        )
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['affinity']} (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, score FLOAT NOT NULL DEFAULT 0, last_requested TIMESTAMP NULL DEFAULT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, user_id, url_key))"
+        )
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {schema}.{cfg['recommendations']} (id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT NOT NULL, requester_id BIGINT DEFAULT NULL, seed_title TEXT, seed_url TEXT, query_text TEXT, chosen_url TEXT, chosen_title TEXT, reason VARCHAR(80), accepted BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
         # Compatibility helpers for legacy music-bot schemas.
         for stmt in [
             f"ALTER TABLE {schema}.{cfg['playback']} ADD COLUMN bot_name VARCHAR(50) DEFAULT '{drone}'",
@@ -1192,6 +1204,10 @@ class AutonomousEngine:
             f"ALTER TABLE {schema}.{cfg['direct']} ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
             f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN attempts INT NOT NULL DEFAULT 0",
             f"ALTER TABLE {schema}.{cfg['override']} ADD COLUMN last_error TEXT NULL",
+            f"CREATE INDEX {drone}_track_intelligence_recent_idx ON {schema}.{cfg['intelligence']} (guild_id, last_played)",
+            f"CREATE INDEX {drone}_track_intelligence_requester_idx ON {schema}.{cfg['intelligence']} (guild_id, last_requester_id, last_played)",
+            f"CREATE INDEX {drone}_user_affinity_recent_idx ON {schema}.{cfg['affinity']} (guild_id, user_id, last_requested)",
+            f"CREATE INDEX {drone}_smart_recommendations_recent_idx ON {schema}.{cfg['recommendations']} (guild_id, created_at)",
         ]:
             try:
                 await cur.execute(stmt)
