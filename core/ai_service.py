@@ -25,6 +25,7 @@ DEFAULT_PROMPT_LIMIT = max(4096, int(os.getenv("ARIA_AI_MAX_PROMPT_CHARS", "6000
 DEFAULT_SYSTEM_LIMIT = max(2048, int(os.getenv("ARIA_AI_MAX_SYSTEM_CHARS", "12000")))
 DEFAULT_MAX_RETRY_DELAY_SECONDS = max(3.0, float(os.getenv("ARIA_AI_MAX_RETRY_DELAY_SECONDS", "20")))
 DEFAULT_RETRY_ATTEMPTS = max(0, int(os.getenv("ARIA_AI_RETRY_ATTEMPTS", "1")))
+DEFAULT_MAX_CONCURRENT_REQUESTS = max(1, int(os.getenv("ARIA_AI_MAX_CONCURRENT_REQUESTS", "3")))
 RETRY_DELAY_RE = re.compile(r"retry(?: in)?\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 RETRY_INFO_RE = re.compile(r"'retryDelay':\s*'([0-9]+)s'", re.IGNORECASE)
 
@@ -141,6 +142,7 @@ class AIService:
         self._groq_client = None
         self._openai_client = None
         self._rate_limited_until = 0.0
+        self._request_semaphore = asyncio.Semaphore(DEFAULT_MAX_CONCURRENT_REQUESTS)
 
     @staticmethod
     def _dedupe_models(primary: str, candidates: list[str] | None) -> list[str]:
@@ -778,10 +780,11 @@ class AIService:
         raise AIServiceUnavailable("No AI provider returned a usable response.")
 
     async def generate(self, prompt: str, *, system_instruction: str | None = None) -> str:
-        return await self._generate_with_fallback(
-            prompt=self._clip_text(prompt, self.prompt_limit),
-            system_instruction=system_instruction,
-        )
+        async with self._request_semaphore:
+            return await self._generate_with_fallback(
+                prompt=self._clip_text(prompt, self.prompt_limit),
+                system_instruction=system_instruction,
+            )
 
     async def generate_with_attachment(
         self,
@@ -792,10 +795,11 @@ class AIService:
         attachment_name: str,
         system_instruction: str | None = None,
     ) -> str:
-        return await self._generate_with_fallback(
-            prompt=self._clip_text(prompt, self.prompt_limit),
-            system_instruction=system_instruction,
-            attachment_bytes=attachment_bytes,
-            attachment_mime_type=attachment_mime_type,
-            attachment_name=attachment_name,
-        )
+        async with self._request_semaphore:
+            return await self._generate_with_fallback(
+                prompt=self._clip_text(prompt, self.prompt_limit),
+                system_instruction=system_instruction,
+                attachment_bytes=attachment_bytes,
+                attachment_mime_type=attachment_mime_type,
+                attachment_name=attachment_name,
+            )

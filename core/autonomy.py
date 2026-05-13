@@ -64,6 +64,12 @@ class AutonomousEngine:
         self._cooldowns: dict[str, float] = {}
         self._cooldown_seconds = 45.0
         self._diagnostic_cache: dict[str, dict[str, Any]] = {}
+        self._repair_tables_ready = False
+        self._repair_tables_lock = asyncio.Lock()
+        self._bot_schema_ready: set[str] = set()
+        self._bot_schema_locks: dict[str, asyncio.Lock] = {}
+        self._bot_schema_retry_after: dict[str, float] = {}
+        self._bot_schema_recheck_seconds = max(30.0, float(os.getenv("ARIA_BOT_SCHEMA_RECHECK_SECONDS", "300") or "300"))
 
         self._max_repair_attempts = 3
         self._repair_followup_delay = 6.0
@@ -89,6 +95,16 @@ class AutonomousEngine:
         self._swarm_degraded_cooldown_seconds = max(60, int(os.getenv('ARIA_SWARM_DEGRADED_COOLDOWN_SECONDS', '180') or '180'))
 
     async def ensure_repair_tables(self) -> None:
+        if self._repair_tables_ready:
+            return
+        async with self._repair_tables_lock:
+            if self._repair_tables_ready:
+                return
+            await self._ensure_repair_tables_uncached()
+            if db.pool:
+                self._repair_tables_ready = True
+
+    async def _ensure_repair_tables_uncached(self) -> None:
         if not db.pool:
             return
         async with db.pool.acquire() as conn:
@@ -1094,6 +1110,27 @@ class AutonomousEngine:
             logger.exception("Failed to journal repair")
 
     async def ensure_bot_schema(self, cur, drone: str) -> None:
+        if drone in self._bot_schema_ready:
+            return
+        now = time.monotonic()
+        if self._bot_schema_retry_after.get(drone, 0.0) > now:
+            return
+        lock = self._bot_schema_locks.get(drone)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._bot_schema_locks[drone] = lock
+        async with lock:
+            if drone in self._bot_schema_ready:
+                return
+            try:
+                await self._ensure_bot_schema_uncached(cur, drone)
+            except Exception:
+                self._bot_schema_retry_after[drone] = time.monotonic() + self._bot_schema_recheck_seconds
+                raise
+            self._bot_schema_ready.add(drone)
+            self._bot_schema_retry_after.pop(drone, None)
+
+    async def _ensure_bot_schema_uncached(self, cur, drone: str) -> None:
         cfg = BOT_SCHEMAS[drone]
         schema = cfg["schema"]
         await cur.execute(
@@ -1357,15 +1394,23 @@ class AutonomousEngine:
                         if not guild_id:
                             continue
                         try:
-                            queue_count_row = await self._fetchone(cur, f"SELECT COUNT(*) AS c FROM {cfg['schema']}.{cfg['queue']} WHERE guild_id=%s", (guild_id,))
-                            backup_count_row = await self._fetchone(cur, f"SELECT COUNT(*) AS c FROM {cfg['schema']}.{cfg['backup']} WHERE guild_id=%s", (guild_id,))
-                            home_row = await self._fetchone(cur, f"SELECT home_vc_id FROM {cfg['schema']}.{cfg['home']} WHERE guild_id=%s", (guild_id,))
-                            pending_orders = await self._fetchone(cur, f"SELECT COUNT(*) AS c FROM {cfg['schema']}.{cfg['direct']} WHERE guild_id=%s AND created_at < NOW() - INTERVAL 5 MINUTE", (guild_id,))
+                            await cur.execute(
+                                f"""
+                                SELECT
+                                    (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['queue']} WHERE guild_id=%s) AS queue_count,
+                                    (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['backup']} WHERE guild_id=%s) AS backup_count,
+                                    (SELECT home_vc_id FROM {cfg['schema']}.{cfg['home']} WHERE guild_id=%s LIMIT 1) AS home_vc_id,
+                                    (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['direct']} WHERE guild_id=%s AND created_at < NOW() - INTERVAL 5 MINUTE) AS pending_orders
+                                """,
+                                (guild_id, guild_id, guild_id, guild_id),
+                            )
+                            state_counts = await cur.fetchone() or {}
                         except Exception:
                             continue
-                        queue_count = int((queue_count_row or {}).get("c", 0))
-                        backup_count = int((backup_count_row or {}).get("c", 0))
-                        home_vc_id = (home_row or {}).get("home_vc_id")
+                        queue_count = int((state_counts or {}).get("queue_count", 0))
+                        backup_count = int((state_counts or {}).get("backup_count", 0))
+                        home_vc_id = (state_counts or {}).get("home_vc_id")
+                        pending_order_count = int((state_counts or {}).get("pending_orders", 0))
                         is_playing = bool(row.get("is_playing"))
                         is_paused = bool(row.get("is_paused"))
                         updated_seconds = -1.0
@@ -1378,7 +1423,7 @@ class AutonomousEngine:
                         except Exception:
                             updated_stale = False
                         has_recovery_material = bool(queue_count > 0 or backup_count > 0 or row.get("current_track"))
-                        if pending_orders and int((pending_orders or {}).get("c", 0)):
+                        if pending_order_count:
                             issues.append({"type": "stale_orders", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
                         if is_playing and not row.get("current_track") and queue_count == 0:
                             issues.append({"type": "invalid_playback_state", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
@@ -1587,8 +1632,7 @@ class AutonomousEngine:
         if issue_type in {"invalid_playback_state", "invalid_position"}:
             pos_ok = True
             if playback is not None and issue_type == "invalid_position":
-                pos_row = await self._fetchone(cur, f"SELECT position_seconds FROM {cfg['schema']}.{cfg['playback']} WHERE guild_id=%s", (guild_id,))
-                pos_ok = float((pos_row or {}).get("position_seconds") or 0) >= 0
+                pos_ok = float((playback or {}).get("position_seconds") or 0) >= 0
             return pos_ok and not (playback or {}).get("is_playing") if playback else pos_ok
         if issue_type == "stale_orders":
             stale_row = await self._fetchone(cur, f"SELECT COUNT(*) AS c FROM {cfg['schema']}.{cfg['direct']} WHERE guild_id=%s AND created_at < NOW() - INTERVAL 5 MINUTE", (guild_id,))

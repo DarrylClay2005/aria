@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import re
+import time
 
 try:
     import aiomysql
@@ -40,6 +43,37 @@ GUILD_SETTINGS_COLUMNS = (
     ("dj_only_mode", "BOOLEAN DEFAULT FALSE"),
     ("stay_in_vc", "BOOLEAN DEFAULT FALSE"),
 )
+SCHEMA_CACHE_RECHECK_SECONDS = max(30.0, float(os.getenv("ARIA_SWARM_SCHEMA_RECHECK_SECONDS", "300") or "300"))
+ACTIVE_DRONE_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ARIA_ACTIVE_DRONE_CACHE_TTL_SECONDS", "5") or "5"))
+HOME_CHANNEL_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("ARIA_HOME_CHANNEL_CACHE_TTL_SECONDS", "15") or "15"))
+
+_direct_order_schema_ready: set[str] = set()
+_direct_order_schema_retry_after: dict[str, float] = {}
+_direct_order_schema_locks: dict[str, asyncio.Lock] = {}
+_guild_settings_schema_ready: set[str] = set()
+_guild_settings_schema_retry_after: dict[str, float] = {}
+_guild_settings_schema_locks: dict[str, asyncio.Lock] = {}
+_active_drones_cache: dict[int, tuple[float, list[str]]] = {}
+_home_channel_cache: dict[tuple[int, str], tuple[float, int | None]] = {}
+
+
+def _schema_lock(locks: dict[str, asyncio.Lock], bot_name: str) -> asyncio.Lock:
+    lock = locks.get(bot_name)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[bot_name] = lock
+    return lock
+
+
+def invalidate_swarm_route_cache(guild_id: int | None = None) -> None:
+    if guild_id is None:
+        _active_drones_cache.clear()
+        _home_channel_cache.clear()
+        return
+    guild_key = int(guild_id)
+    _active_drones_cache.pop(guild_key, None)
+    for cache_key in [key for key in _home_channel_cache if key[0] == guild_key]:
+        _home_channel_cache.pop(cache_key, None)
 
 
 def normalize_drone_name(name: str | None) -> str | None:
@@ -117,6 +151,24 @@ async def ensure_direct_order_schema(cur, bot_name: str) -> None:
     """Keep Aria's direct-order table compatible with every music bot build."""
     if bot_name not in DRONE_NAMES:
         raise ValueError(f"Unknown swarm node: {bot_name}")
+    if bot_name in _direct_order_schema_ready:
+        return
+    now = time.monotonic()
+    if _direct_order_schema_retry_after.get(bot_name, 0.0) > now:
+        return
+    async with _schema_lock(_direct_order_schema_locks, bot_name):
+        if bot_name in _direct_order_schema_ready:
+            return
+        try:
+            await _ensure_direct_order_schema_uncached(cur, bot_name)
+        except Exception:
+            _direct_order_schema_retry_after[bot_name] = time.monotonic() + SCHEMA_CACHE_RECHECK_SECONDS
+            raise
+        _direct_order_schema_ready.add(bot_name)
+        _direct_order_schema_retry_after.pop(bot_name, None)
+
+
+async def _ensure_direct_order_schema_uncached(cur, bot_name: str) -> None:
     await cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (
@@ -167,9 +219,30 @@ async def insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | No
         f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
         (bot_name, int(guild_id or 0), vc_id if vc_id else None, text_channel_id if text_channel_id else None, command, data or ""),
     )
+    invalidate_swarm_route_cache(guild_id)
 
 
 async def ensure_guild_settings_schema(cur, bot_name: str) -> None:
+    if bot_name not in DRONE_NAMES:
+        raise ValueError(f"Unknown swarm node: {bot_name}")
+    if bot_name in _guild_settings_schema_ready:
+        return
+    now = time.monotonic()
+    if _guild_settings_schema_retry_after.get(bot_name, 0.0) > now:
+        return
+    async with _schema_lock(_guild_settings_schema_locks, bot_name):
+        if bot_name in _guild_settings_schema_ready:
+            return
+        try:
+            await _ensure_guild_settings_schema_uncached(cur, bot_name)
+        except Exception:
+            _guild_settings_schema_retry_after[bot_name] = time.monotonic() + SCHEMA_CACHE_RECHECK_SECONDS
+            raise
+        _guild_settings_schema_ready.add(bot_name)
+        _guild_settings_schema_retry_after.pop(bot_name, None)
+
+
+async def _ensure_guild_settings_schema_uncached(cur, bot_name: str) -> None:
     await cur.execute(
         f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings "
         "(guild_id BIGINT PRIMARY KEY)"
@@ -203,6 +276,11 @@ class SwarmController:
         active = []
         if not db.pool:
             return active
+        guild_key = int(guild_id or 0)
+        now = time.monotonic()
+        cached = _active_drones_cache.get(guild_key)
+        if cached and cached[0] > now:
+            return list(cached[1])
 
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
@@ -220,6 +298,7 @@ class SwarmController:
                         row = None
                     if row:
                         active.append(drone)
+        _active_drones_cache[guild_key] = (time.monotonic() + ACTIVE_DRONE_CACHE_TTL_SECONDS, list(active))
         return active
 
     async def resolve_play_target(self, guild_id: int, requested_drone: str | None, requested_vc_id: int | None) -> tuple[str, int | None]:
@@ -366,20 +445,10 @@ class SwarmController:
 
         requested_vc_id = voice_channel_id_from_ctx(ctx)
         if requested_vc_id and db.pool:
-            async with db.pool.acquire() as conn:
-                async with conn.cursor(self._dict_cursor()) as cur:
-                    for candidate in DRONE_NAMES:
-                        try:
-                            await cur.execute(
-                                f"SELECT home_vc_id FROM discord_music_{candidate}.{candidate}_bot_home_channels "
-                                "WHERE guild_id = %s LIMIT 1",
-                                (guild_id,),
-                            )
-                            row = await cur.fetchone()
-                        except Exception:
-                            row = None
-                        if row and row.get("home_vc_id") == requested_vc_id:
-                            return await self.direct(ctx, candidate, "LEAVE")
+            for candidate in DRONE_NAMES:
+                home_channel_id = await self._lookup_home_channel(guild_id, candidate)
+                if home_channel_id == requested_vc_id:
+                    return await self.direct(ctx, candidate, "LEAVE")
 
         return "I couldn't identify which swarm node should leave. Name the node explicitly."
 
@@ -432,6 +501,11 @@ class SwarmController:
         # FIX: guard against uninitialized pool before attempting acquire
         if not db.pool:
             return None
+        cache_key = (int(guild_id or 0), drone)
+        now = time.monotonic()
+        cached = _home_channel_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
@@ -442,7 +516,9 @@ class SwarmController:
                     row = await cur.fetchone()
                 except Exception:
                     row = None
-        return row.get("home_vc_id") if row else None
+        home_channel_id = row.get("home_vc_id") if row else None
+        _home_channel_cache[cache_key] = (time.monotonic() + HOME_CHANNEL_CACHE_TTL_SECONDS, home_channel_id)
+        return home_channel_id
 
     async def set_home(self, ctx, drone: str, channel_id: int) -> str:
         if not db.pool:
@@ -468,6 +544,7 @@ class SwarmController:
                     f"REPLACE INTO discord_music_{bot_name}.{bot_name}_bot_home_channels (guild_id, bot_name, home_vc_id) VALUES (%s, %s, %s)",
                     (guild.id, bot_name, channel.id),
                 )
+        invalidate_swarm_route_cache(guild.id)
         return f"Set `{bot_name}` home channel to `{channel.name}`."
 
     async def set_loop(self, ctx, mode: str, *, drone: str | None = None) -> str:
@@ -645,8 +722,17 @@ class SwarmController:
                 for bot_name in DRONE_NAMES:
                     try:
                         await cur.execute(
-                            f"SELECT guild_id, is_playing FROM discord_music_{bot_name}.{bot_name}_playback_state WHERE guild_id = %s LIMIT 1",
-                            (guild_id,),
+                            f"""
+                            SELECT
+                                p.guild_id,
+                                p.is_playing,
+                                (SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 1) AS next_title,
+                                (SELECT COUNT(*) FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s) AS q_len
+                            FROM discord_music_{bot_name}.{bot_name}_playback_state p
+                            WHERE p.guild_id = %s
+                            LIMIT 1
+                            """,
+                            (guild_id, guild_id, guild_id),
                         )
                         state = await cur.fetchone()
                     except Exception:
@@ -654,27 +740,9 @@ class SwarmController:
                     if not state:
                         continue
 
-                    try:
-                        await cur.execute(
-                            f"SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 1",
-                            (guild_id,),
-                        )
-                        track_row = await cur.fetchone()
-                    except Exception:
-                        track_row = None
-
-                    try:
-                        await cur.execute(
-                            f"SELECT COUNT(*) AS q_len FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s",
-                            (guild_id,),
-                        )
-                        q_len_row = await cur.fetchone()
-                    except Exception:
-                        q_len_row = {"q_len": 0}
-
                     status = "playing" if state.get("is_playing") else "paused"
-                    track = track_row["title"] if track_row else "nothing queued"
-                    lines.append(f"{guild.name if guild else guild_id} | {bot_name}: {status}, next up `{track}`, queue {q_len_row['q_len']}.")
+                    track = state.get("next_title") or "nothing queued"
+                    lines.append(f"{guild.name if guild else guild_id} | {bot_name}: {status}, next up `{track}`, queue {state.get('q_len') or 0}.")
 
         return "\n".join(lines) if lines else "Grid is quiet. No active swarm nodes reported for this server."
 

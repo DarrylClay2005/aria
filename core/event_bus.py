@@ -50,6 +50,9 @@ class EventBus:
         self._sync_lock = asyncio.Lock()
         self._column_cache: dict[tuple[str, str], tuple[float, set[str]]] = {}
         self._column_cache_ttl_seconds = max(30.0, float(os.getenv("ARIA_EVENTBUS_COLUMN_CACHE_TTL_SECONDS", "300") or "300"))
+        self._cursor_cache: dict[str, str] = {}
+        self._health_write_cache: dict[str, tuple[float, str, float, str]] = {}
+        self._health_write_cache_ttl_seconds = max(5.0, float(os.getenv("ARIA_HEALTH_WRITE_CACHE_TTL_SECONDS", "15") or "15"))
 
     @staticmethod
     def _dict_cursor():
@@ -118,23 +121,34 @@ class EventBus:
                 )
 
     async def _get_cursor(self, cur, key: str, default: str = "0") -> str:
+        key = key[:255]
+        cached = self._cursor_cache.get(key)
+        if cached is not None:
+            return cached
         await cur.execute("SELECT cursor_value FROM aria_event_cursors WHERE cursor_key=%s", (key,))
         row = await cur.fetchone()
         if not row:
+            self._cursor_cache[key] = default
             return default
         if isinstance(row, dict):
-            return str(row.get("cursor_value", default))
-        return str(row[0])
+            value = str(row.get("cursor_value", default))
+        else:
+            value = str(row[0])
+        self._cursor_cache[key] = value
+        return value
 
     async def _set_cursor(self, cur, key: str, value: str) -> None:
+        key = key[:255]
+        value = str(value)[:255]
         await cur.execute(
             """
             INSERT INTO aria_event_cursors (cursor_key, cursor_value)
             VALUES (%s, %s)
             ON DUPLICATE KEY UPDATE cursor_value = VALUES(cursor_value)
             """,
-            (key[:255], str(value)[:255]),
+            (key, value),
         )
+        self._cursor_cache[key] = value
 
     async def _table_columns(self, cur, schema: str, table: str) -> set[str]:
         cache_key = (str(schema), str(table))
@@ -218,7 +232,7 @@ class EventBus:
     ) -> None:
         if not db.pool:
             return
-        payload_json = json.dumps(payload or {}, default=str)
+        payload_json = json.dumps(payload or {}, separators=(",", ":"), default=str)
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -297,7 +311,7 @@ class EventBus:
         }
 
     def _signature(self, state: dict[str, Any]) -> str:
-        raw = json.dumps(self._signature_payload(state), sort_keys=True, default=str)
+        raw = json.dumps(self._signature_payload(state), separators=(",", ":"), sort_keys=True, default=str)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:40]
 
     @staticmethod
@@ -420,14 +434,37 @@ class EventBus:
             cursor_key = f"state:{drone}:{guild_id}"
             previous_signature = await self._get_cursor(cur, cursor_key, default="")
             score, label = self._compute_health(state)
-            await cur.execute(
-                """
-                INSERT INTO aria_swarm_health (bot_name, guild_id, state_signature, state_json, health_score, status_label)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE state_signature=VALUES(state_signature), state_json=VALUES(state_json), health_score=VALUES(health_score), status_label=VALUES(status_label)
-                """,
-                (drone, guild_id, signature, json.dumps(state, default=str), score, label),
+            now = time.monotonic()
+            cached_health = self._health_write_cache.get(cursor_key)
+            should_write_health = (
+                cached_health is None
+                or cached_health[0] <= now
+                or cached_health[1] != signature
+                or cached_health[2] != score
+                or cached_health[3] != label
             )
+            if should_write_health:
+                await cur.execute(
+                    """
+                    INSERT INTO aria_swarm_health (bot_name, guild_id, state_signature, state_json, health_score, status_label)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE state_signature=VALUES(state_signature), state_json=VALUES(state_json), health_score=VALUES(health_score), status_label=VALUES(status_label)
+                    """,
+                    (
+                        drone,
+                        guild_id,
+                        signature,
+                        json.dumps(state, separators=(",", ":"), default=str),
+                        score,
+                        label,
+                    ),
+                )
+                self._health_write_cache[cursor_key] = (
+                    now + self._health_write_cache_ttl_seconds,
+                    signature,
+                    score,
+                    label,
+                )
             if signature != previous_signature:
                 await cur.execute(
                     """
@@ -436,29 +473,29 @@ class EventBus:
                     """,
                     (drone, guild_id, score, label, signature),
                 )
-            await cur.execute(
-                """
-                SELECT health_score FROM aria_swarm_health_history
-                WHERE bot_name=%s AND guild_id=%s
-                ORDER BY id DESC LIMIT 4
-                """,
-                (drone, guild_id),
-            )
-            recent_scores = await cur.fetchall() or []
-            if len(recent_scores) >= 3:
-                vals = []
-                for item in recent_scores:
-                    vals.append(float(item.get("health_score") if isinstance(item, dict) else item[0]))
-                if vals and max(vals) - min(vals) >= 0.22 and vals[0] < vals[-1]:
-                    await self.emit_event(
-                        event_type="health_trending_down",
-                        source_system="swarm_health",
-                        bot_name=drone,
-                        guild_id=guild_id,
-                        severity="warning",
-                        payload={**state, "health_score": score, "status_label": label, "recent_health": vals[:4]},
-                        dedupe_key=f"healthtrend:{drone}:{guild_id}:{signature}",
-                    )
+                await cur.execute(
+                    """
+                    SELECT health_score FROM aria_swarm_health_history
+                    WHERE bot_name=%s AND guild_id=%s
+                    ORDER BY id DESC LIMIT 4
+                    """,
+                    (drone, guild_id),
+                )
+                recent_scores = await cur.fetchall() or []
+                if len(recent_scores) >= 3:
+                    vals = []
+                    for item in recent_scores:
+                        vals.append(float(item.get("health_score") if isinstance(item, dict) else item[0]))
+                    if vals and max(vals) - min(vals) >= 0.22 and vals[0] < vals[-1]:
+                        await self.emit_event(
+                            event_type="health_trending_down",
+                            source_system="swarm_health",
+                            bot_name=drone,
+                            guild_id=guild_id,
+                            severity="warning",
+                            payload={**state, "health_score": score, "status_label": label, "recent_health": vals[:4]},
+                            dedupe_key=f"healthtrend:{drone}:{guild_id}:{signature}",
+                        )
             payload = {**state, "health_score": score, "status_label": label}
             if signature != previous_signature:
                 await self.emit_event(
