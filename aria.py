@@ -4,6 +4,7 @@ import logging
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 from discord import app_commands
 
 # ================================
@@ -14,7 +15,8 @@ from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
 from core.chat_attachments import MAX_CHAT_ATTACHMENTS, build_chat_upload_prompt, prepare_chat_uploads
-from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TOKEN
+from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TELEGRAM_ALLOWED_CHAT_IDS, TELEGRAM_BOT_TOKEN, TELEGRAM_POLLING_ENABLED, TOKEN
+from core.telegram_bridge import TelegramBridge
 from core.webhooks import close_http_session, install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
 
@@ -39,6 +41,7 @@ class AriaBot(commands.Bot):
         self.event_bus = EventBus(self)
         self.monitor = Monitor(self, self.event_bus)
         self.monitor_task = None
+        self.telegram_bridge = None
         self.aria_chat_semaphore = asyncio.Semaphore(max(1, int(os.getenv("ARIA_CHAT_CONCURRENCY", "3") or "3")))
         self._last_ready_webhook_at = 0.0
 
@@ -80,8 +83,25 @@ class AriaBot(commands.Bot):
         except ValueError:
             logger.warning("Invalid ARIA_OVERRIDE_USER_ID value: %s", OVERRIDE_USER_ID)
 
+        if TELEGRAM_POLLING_ENABLED and TELEGRAM_BOT_TOKEN:
+            self.telegram_bridge = TelegramBridge(
+                token=TELEGRAM_BOT_TOKEN,
+                name="aria",
+                handler=self.handle_telegram_update,
+                allowed_chat_ids=TELEGRAM_ALLOWED_CHAT_IDS,
+                commands=[
+                    ("chat", "Chat with Aria"),
+                    ("status", "Show Aria runtime status"),
+                    ("id", "Show this Telegram chat id"),
+                    ("help", "Show available Aria commands"),
+                ],
+            )
+            await self.telegram_bridge.start()
+
     async def close(self):
         # 🟢 Cleanly close long-lived resources when the bot shuts down.
+        if self.telegram_bridge:
+            await self.telegram_bridge.close()
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
             try:
@@ -93,6 +113,68 @@ class AriaBot(commands.Bot):
         await close_http_session()
         await db.close()
         await super().close()
+
+    async def handle_telegram_update(self, event: dict) -> str | None:
+        text = str(event.get("text") or "").strip()
+        if not text:
+            return None
+        chat_id = int(event.get("chat_id") or 0)
+        message = event.get("message") or {}
+        sender = message.get("from") or {}
+        user_id = int(sender.get("id") or chat_id or 0)
+        user_name = str(sender.get("username") or sender.get("first_name") or f"telegram-{user_id}")
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+
+        if command in {"/start", "/help"}:
+            return (
+                "Aria is connected to Telegram.\n"
+                "Send any message to chat, use /chat <prompt> for explicit chat, /status for runtime status, or /id to see this chat id."
+            )
+        if command == "/id":
+            return f"Telegram chat id: {chat_id}"
+        if command == "/status":
+            monitor_live = bool(self.monitor_task and not self.monitor_task.done())
+            telegram_status = self.telegram_bridge.status if self.telegram_bridge else None
+            username = telegram_status.bot_username if telegram_status else ""
+            return (
+                "Aria Telegram status\n"
+                f"Discord: {'online' if self.is_ready() else 'starting'}\n"
+                f"Database: {'connected' if db.is_connected else 'not connected'}\n"
+                f"Autonomous monitor: {'running' if monitor_live else 'stopped'}\n"
+                f"Telegram bot: @{username or 'unknown'}"
+            )
+
+        prompt = text
+        if command == "/chat":
+            prompt = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ""
+        if not prompt:
+            return "Give me a prompt after /chat."
+
+        fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+        fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
+        maybe_command = prompt[5:].strip() if prompt.lower().startswith("aria ") else prompt
+
+        try:
+            await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
+        except TimeoutError:
+            return "I am already handling a few Aria requests. Try again in a moment."
+
+        try:
+            if prompt.lower().startswith("aria "):
+                routed = await self.aria_core.handle(fake_ctx, maybe_command)
+                if routed:
+                    return routed
+            return await self.aria_core.chat(
+                maybe_command,
+                system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
+                user_id=user_id,
+                guild_id=None,
+                user_name=user_name,
+                source_kind="telegram_chat",
+                response_style="telegram_chat",
+            )
+        finally:
+            self.aria_chat_semaphore.release()
 
 # ================================
 # 🚀 BOT INIT

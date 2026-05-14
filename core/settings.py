@@ -4,8 +4,21 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency in some local shells
-    def load_dotenv(*args, **kwargs):
-        return False
+    def load_dotenv(path, override=False, **_kwargs):
+        env_path = Path(path)
+        if not env_path.is_file():
+            return False
+        for raw_line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key or (not override and key in os.environ):
+                continue
+            value = value.strip().strip('"').strip("'")
+            os.environ[key] = value
+        return True
 
 
 BOT_ENV_PREFIX = "ARIA"
@@ -34,14 +47,18 @@ def load_external_env() -> Path | None:
     if explicit_env_file:
         candidates.append(Path(explicit_env_file).expanduser())
 
+    candidates.append(PROJECT_ROOT / ".env")
     candidates.append(_build_external_env_path())
 
+    loaded_file = None
     for candidate in candidates:
         if candidate.is_file():
             load_dotenv(candidate, override=False)
-            _ENV_STATE["loaded_file"] = candidate
-            return candidate
+            loaded_file = loaded_file or candidate
 
+    _ENV_STATE["loaded_file"] = loaded_file
+    if loaded_file:
+        return loaded_file
     return None
 
 
@@ -52,8 +69,32 @@ def prefixed_env(name: str, default: str = "") -> str:
     return os.getenv(f"{BOT_ENV_PREFIX}_{name}", default)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = prefixed_env(name, os.getenv(name, ""))
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int_set(name: str) -> set[int]:
+    raw = prefixed_env(name, os.getenv(name, ""))
+    values: set[int] = set()
+    for item in str(raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            values.add(int(item))
+        except ValueError:
+            continue
+    return values
+
+
 TOKEN = prefixed_env("DISCORD_TOKEN", "").strip()
 OVERRIDE_USER_ID = prefixed_env("OVERRIDE_USER_ID", _DEFAULT_OVERRIDE_USER_ID).strip()
+TELEGRAM_BOT_TOKEN = (prefixed_env("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+TELEGRAM_ALLOWED_CHAT_IDS = _env_int_set("TELEGRAM_ALLOWED_CHAT_IDS")
+TELEGRAM_POLLING_ENABLED = _env_bool("TELEGRAM_POLLING_ENABLED", bool(TELEGRAM_BOT_TOKEN))
 GEMINI_MODEL_ID = prefixed_env("GEMINI_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")).strip() or "gemini-2.5-flash-lite"
 GEMINI_FALLBACK_MODELS = [
     value.strip()
