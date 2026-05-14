@@ -114,8 +114,17 @@ def _calculate_scaled_size(size: tuple[int, int], *, min_edge: int, max_edge: in
     return max(1, round(width * scale)), max(1, round(height * scale))
 
 
-def _enhance_image(image: Image.Image, *, sharpness: float = 1.22, contrast: float = 1.05) -> Image.Image:
+def _enhance_image(
+    image: Image.Image,
+    *,
+    sharpness: float = 1.18,
+    contrast: float = 1.02,
+    brightness: float = 1.02,
+    color: float = 1.01,
+) -> Image.Image:
     image = ImageEnhance.Sharpness(image).enhance(sharpness)
+    image = ImageEnhance.Brightness(image).enhance(brightness)
+    image = ImageEnhance.Color(image).enhance(color)
     image = ImageEnhance.Contrast(image).enhance(contrast)
     return image
 
@@ -125,8 +134,8 @@ def render_delivery_image(
     *,
     min_edge: int = 1280,
     max_edge: int = 2048,
-    sharpness: float = 1.22,
-    contrast: float = 1.05,
+    sharpness: float = 1.18,
+    contrast: float = 1.02,
 ) -> RenderedImage:
     image = _open_image(source)
     has_alpha = "A" in image.getbands()
@@ -143,8 +152,8 @@ def render_upscale_fallback(source: bytes, *, min_edge: int = 2048, max_edge: in
         source,
         min_edge=min_edge,
         max_edge=max_edge,
-        sharpness=1.32,
-        contrast=1.08,
+        sharpness=1.24,
+        contrast=1.02,
     )
 
 

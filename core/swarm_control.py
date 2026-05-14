@@ -37,6 +37,18 @@ FILTER_ALIASES = {
     "vaporwave": "vaporwave",
     "bassboost": "bassboost",
     "8d": "8d",
+    "8daudio": "8d",
+    "karaoke": "karaoke",
+    "tremolo": "tremolo",
+    "vibrato": "vibrato",
+    "lowpass": "lowpass",
+    "low_pass": "lowpass",
+    "lofi": "lofi",
+    "lo-fi": "lofi",
+    "electronic": "electronic",
+    "party": "party",
+    "radio": "radio",
+    "cinema": "cinema",
 }
 LOOP_ALIASES = {"off": "off", "song": "song", "queue": "queue"}
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
@@ -49,6 +61,8 @@ GUILD_SETTINGS_COLUMNS = (
     ("dj_role_id", "BIGINT DEFAULT NULL"),
     ("feedback_channel_id", "BIGINT DEFAULT NULL"),
     ("transition_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("fade_seconds", "FLOAT DEFAULT 5.0"),
+    ("fade_curve", "VARCHAR(20) DEFAULT 'linear'"),
     ("custom_speed", "FLOAT DEFAULT 1.0"),
     ("custom_pitch", "FLOAT DEFAULT 1.0"),
     ("custom_modifiers_left", "INT DEFAULT 0"),

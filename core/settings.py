@@ -54,10 +54,10 @@ def prefixed_env(name: str, default: str = "") -> str:
 
 TOKEN = prefixed_env("DISCORD_TOKEN", "").strip()
 OVERRIDE_USER_ID = prefixed_env("OVERRIDE_USER_ID", _DEFAULT_OVERRIDE_USER_ID).strip()
-GEMINI_MODEL_ID = prefixed_env("GEMINI_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")).strip() or "gemini-2.5-flash"
+GEMINI_MODEL_ID = prefixed_env("GEMINI_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")).strip() or "gemini-2.5-flash-lite"
 GEMINI_FALLBACK_MODELS = [
     value.strip()
-    for value in prefixed_env("GEMINI_FALLBACK_MODELS", os.getenv("GEMINI_FALLBACK_MODELS", "")).split(",")
+    for value in prefixed_env("GEMINI_FALLBACK_MODELS", os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash")).split(",")
     if value.strip()
 ]
 GROK_MODEL_ID = prefixed_env("GROK_MODEL", os.getenv("GROK_MODEL", "grok-4.3")).strip() or "grok-4.3"

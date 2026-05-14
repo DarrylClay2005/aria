@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands, tasks
 import logging
+import os
+import time
 from datetime import datetime, timezone, timedelta
 from core.ai_service import AIService, AIServiceUnavailable
 from core.database import db
@@ -11,10 +13,16 @@ class PresenceProfiler(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.ai_service = AIService()
-        self.shame_loop.start()
+        self.enabled = str(os.getenv("ARIA_ENABLE_PRESENCE_PROFILER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        self.allow_timeouts = str(os.getenv("ARIA_PRESENCE_ALLOW_TIMEOUTS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        self.cooldown_seconds = max(900, int(os.getenv("ARIA_PRESENCE_USER_COOLDOWN_SECONDS", "21600") or "21600"))
+        self._last_callout: dict[int, float] = {}
+        if self.enabled:
+            self.shame_loop.start()
 
     def cog_unload(self):
-        self.shame_loop.cancel()
+        if self.shame_loop.is_running():
+            self.shame_loop.cancel()
 
     async def get_affinity(self, user_id: int) -> int:
         async with db.pool.acquire() as conn:
@@ -25,6 +33,8 @@ class PresenceProfiler(commands.Cog):
 
     @tasks.loop(minutes=15.0)
     async def shame_loop(self):
+        if not self.enabled:
+            return
         degenerate_games = ["league of legends", "valorant", "genshin impact", "overwatch 2", "roblox"]
         
         for guild in self.bot.guilds:
@@ -46,6 +56,10 @@ class PresenceProfiler(commands.Cog):
                                 hours_played = duration.total_seconds() / 3600
                                 
                                 if hours_played > 3.0:
+                                    now = time.time()
+                                    if now - self._last_callout.get(member.id, 0.0) < self.cooldown_seconds:
+                                        continue
+                                    self._last_callout[member.id] = now
                                     affinity = await self.get_affinity(member.id)
                                     sys_inst = f"You are Aria Blaze. You hate humans. You just caught '{member.display_name}' playing '{activity.name}' for over {int(hours_played)} straight hours. Roast them mercilessly. Tell them to touch grass and get a job. Swear heavily. Affinity: {affinity}/100."
                                     
@@ -55,11 +69,12 @@ class PresenceProfiler(commands.Cog):
                                         response_text = await self.ai_service.generate(prompt, system_instruction=sys_inst)
                                         await shame_channel.send(f"{member.mention} 🚨 **PRESENCE ALERT** 🚨\n\n{response_text}")
                                         
-                                        try:
-                                            await member.timeout(timedelta(hours=1), reason="Aria's Touch Grass Protocol")
-                                            await shame_channel.send("*(I have timed them out for 1 hour so they are forced to go outside.)*")
-                                        except discord.Forbidden:
-                                            pass
+                                        if self.allow_timeouts:
+                                            try:
+                                                await member.timeout(timedelta(hours=1), reason="Aria presence profiler opt-in timeout")
+                                                await shame_channel.send("*(Timed out for 1 hour by the opt-in presence profiler.)*")
+                                            except discord.Forbidden:
+                                                pass
                                     except AIServiceUnavailable as exc:
                                         logger.warning("Presence profiler unavailable: %s", exc)
                                     except Exception as e:

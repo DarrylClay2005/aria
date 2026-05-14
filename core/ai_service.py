@@ -61,7 +61,7 @@ class AIService:
         openai_fallback_models: list[str] | None = None,
         enable_openai_fallback: bool | None = None,
     ):
-        self.model_id = (model_id or GEMINI_MODEL_ID).strip() or "gemini-2.5-flash"
+        self.model_id = (model_id or GEMINI_MODEL_ID).strip() or "gemini-2.5-flash-lite"
         configured_fallbacks = fallback_models if fallback_models is not None else GEMINI_FALLBACK_MODELS
         self.fallback_models = self._dedupe_models(self.model_id, configured_fallbacks)
         self.api_key = (
@@ -89,7 +89,7 @@ class AIService:
             if env_value:
                 self.enable_grok_primary = env_value in {"1", "true", "yes", "on"}
             else:
-                self.enable_grok_primary = bool(self.grok_api_key)
+                self.enable_grok_primary = False
         else:
             self.enable_grok_primary = bool(enable_grok_primary)
 
@@ -734,7 +734,7 @@ class AIService:
                 ) from primary_exc
             raise AIServiceUnavailable(
                 "No AI provider is configured.",
-                "No AI backend is configured right now. Add `ARIA_GROK_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` and try again.",
+                "No AI backend is configured right now. Add `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, or explicitly enable Grok with `ARIA_ENABLE_GROK_PRIMARY=true`.",
             )
 
         backup_providers: list[tuple[str, Any]] = []

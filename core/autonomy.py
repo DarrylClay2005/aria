@@ -1443,7 +1443,9 @@ class AutonomousEngine:
                             issues.append({"type": "stale_orders", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
                         if is_playing and not row.get("current_track") and queue_count == 0:
                             issues.append({"type": "invalid_playback_state", "drone": drone, "guild_id": guild_id, "queue_count": queue_count, "backup_count": backup_count})
-                        if (queue_count == 0 and backup_count > 0) or (row.get("current_track") and queue_count == 0):
+                        playback_idle = not is_playing and not is_paused
+                        stale_or_idle = playback_idle or updated_stale
+                        if stale_or_idle and ((queue_count == 0 and backup_count > 0) or (row.get("current_track") and queue_count == 0)):
                             issues.append({"type": "queue_rebuild_needed", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "is_playing": is_playing, "is_paused": is_paused, "updated_seconds": updated_seconds})
                         if home_vc_id and has_recovery_material and not is_playing and not is_paused and updated_seconds >= self._state_recovery_min_age_seconds:
                             issues.append({"type": "recover_from_queue", "drone": drone, "guild_id": guild_id, "home_vc_id": home_vc_id, "channel_id": row.get("channel_id"), "queue_count": queue_count, "backup_count": backup_count, "current_track": row.get("current_track"), "is_playing": is_playing, "is_paused": is_paused, "updated_seconds": updated_seconds})
@@ -1598,6 +1600,37 @@ class AutonomousEngine:
         guild_id = issue["guild_id"]
         cfg = BOT_SCHEMAS[drone]
         playback = await self._fetch_playback_row(cur, drone, guild_id)
+        live_queue_count = self._to_int(issue.get("queue_count"))
+        live_backup_count = self._to_int(issue.get("backup_count"))
+        try:
+            counts = await self._fetchone(
+                cur,
+                f"""
+                SELECT
+                    (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['queue']} WHERE guild_id=%s) AS queue_count,
+                    (SELECT COUNT(*) FROM {cfg['schema']}.{cfg['backup']} WHERE guild_id=%s) AS backup_count
+                """,
+                (guild_id, guild_id),
+            ) or {}
+            live_queue_count = int(counts.get("queue_count") or live_queue_count)
+            live_backup_count = int(counts.get("backup_count") or live_backup_count)
+        except Exception:
+            pass
+        if playback:
+            if self._to_bool(playback.get("is_paused")):
+                return RepairResult(True, "recover_skipped_paused", drone, details="playback is paused; RECOVER not needed")
+            if self._to_bool(playback.get("is_playing")):
+                return RepairResult(True, "recover_skipped_active", drone, details="playback is already active; RECOVER not needed")
+            updated_at = playback.get("updated_at")
+            if updated_at is not None:
+                try:
+                    age = max(0.0, time.time() - updated_at.timestamp())
+                    if age < self._state_recovery_min_age_seconds:
+                        return RepairResult(True, "recover_skipped_fresh", drone, details=f"playback state is only {int(age)}s old")
+                except Exception:
+                    pass
+        if live_queue_count <= 0 and live_backup_count <= 0 and not (playback or {}).get("current_track") and not issue.get("current_track"):
+            return RepairResult(False, "recover_skipped_empty", drone, details="no queue, backup queue, or current track to recover")
         vc_id = issue.get("home_vc_id") or issue.get("channel_id") or (playback or {}).get("channel_id")
         text_channel_id = issue.get("text_channel_id") or (playback or {}).get("text_channel_id")
         if not vc_id:

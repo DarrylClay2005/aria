@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import random
 import urllib.parse
 from collections import defaultdict, deque
@@ -13,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core.database import db
+from core.ai_service import AIService
 from core.image_pipeline import (
     ImageCandidate,
     ImagePipelineError,
@@ -27,6 +29,14 @@ from core.image_pipeline import (
 from core.settings import IMAGE_FILTER_LEVEL, REAL_ESRGAN_BINARY, REAL_ESRGAN_MODEL_DIR
 
 logger = logging.getLogger("discord")
+
+UPSCALE_MODEL_SCALES = {
+    "realesrgan-x4plus": 4,
+    "realesrgan-x4plus-anime": 4,
+    "realesr-animevideov3-x2": 2,
+    "realesr-animevideov3-x3": 3,
+    "realesr-animevideov3-x4": 4,
+}
 
 
 class HTTPSessionManager:
@@ -208,6 +218,9 @@ class ImageOps(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.image_filter_level = self._normalize_filter_level(IMAGE_FILTER_LEVEL)
+        aria_core = getattr(bot, "aria_core", None)
+        self.ai_service = getattr(aria_core, "ai", None) or AIService()
+        self.vision_model_selection = str(os.getenv("ARIA_IMAGE_VISION_MODEL_SELECTION", "1")).strip().lower() in {"1", "true", "yes", "on"}
         self._query_shuffle_counts: dict[tuple[int, str], int] = {}
         self._query_recent_fronts: dict[tuple[int, str], list[str]] = {}
         self.ctx_vault = app_commands.ContextMenu(name="💾 Save to Vault", callback=self.save_to_vault_context)
@@ -436,10 +449,72 @@ class ImageOps(commands.Cog):
 
     def _pick_upscale_model(self, query: str, candidate: ImageCandidate) -> str:
         probe = " ".join(filter(None, [query, candidate.title, candidate.page_url or ""])).lower()
-        anime_markers = ("anime", "manga", "waifu", "genshin", "naruto", "bleach", "cosplay")
+        anime_markers = ("anime", "manga", "waifu", "genshin", "naruto", "bleach", "cosplay", "cartoon", "illustration", "2d")
         if any(marker in probe for marker in anime_markers):
-            return "realesrgan-x4plus-anime"
+            return "realesr-animevideov3-x4"
         return "realesrgan-x4plus"
+
+    def _available_upscale_models(self) -> set[str]:
+        try:
+            model_dir = Path(REAL_ESRGAN_MODEL_DIR)
+            return {path.stem for path in model_dir.glob("*.param") if (model_dir / f"{path.stem}.bin").is_file()}
+        except Exception:
+            return set()
+
+    def _safe_upscale_model(self, model_name: str) -> str:
+        available = self._available_upscale_models()
+        if not available or model_name in available:
+            return model_name
+        if "anime" in model_name and "realesrgan-x4plus-anime" in available:
+            return "realesrgan-x4plus-anime"
+        return "realesrgan-x4plus" if "realesrgan-x4plus" in available else sorted(available)[0]
+
+    @staticmethod
+    def _mime_from_image_bytes(payload: bytes) -> str:
+        if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if payload.startswith(b"\xff\xd8"):
+            return "image/jpeg"
+        if payload[:6] in {b"GIF87a", b"GIF89a"}:
+            return "image/gif"
+        if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/png"
+
+    async def _vision_upscale_model_hint(self, query: str, candidate: ImageCandidate, payload: bytes) -> str | None:
+        if not self.vision_model_selection:
+            return None
+        available = sorted(self._available_upscale_models())
+        if not available:
+            return None
+        prompt = (
+            "Choose the best Real-ESRGAN upscale model for this image. "
+            "Return only one exact model id from this list: "
+            f"{', '.join(available)}. "
+            "Use animevideo models for anime, manga, game art, line art, cartoons, and illustrated characters. "
+            "Use realesrgan-x4plus for photos, realistic portraits, screenshots, and mixed real-world backgrounds. "
+            f"Search/request context: {query}. Candidate title/page: {candidate.title or ''} {candidate.page_url or ''}"
+        )
+        try:
+            response = await self.ai_service.generate_with_attachment(
+                prompt,
+                attachment_bytes=payload[:8_000_000],
+                attachment_mime_type=self._mime_from_image_bytes(payload),
+                attachment_name="upscale-source.png",
+                system_instruction="You are a terse image-quality routing model. Return only the model id.",
+            )
+        except Exception as exc:
+            logger.debug("Vision upscale model selection skipped: %s", exc)
+            return None
+        lowered = (response or "").strip().lower()
+        for model in available:
+            if model.lower() in lowered:
+                return model
+        return None
+
+    async def _select_upscale_model(self, query: str, candidate: ImageCandidate, payload: bytes) -> str:
+        vision_choice = await self._vision_upscale_model_hint(query, candidate, payload)
+        return self._safe_upscale_model(vision_choice or self._pick_upscale_model(query, candidate))
 
     async def build_search_embed(
         self,
@@ -509,10 +584,10 @@ class ImageOps(commands.Cog):
 
     async def build_upscaled_image(self, query: str, candidate: ImageCandidate) -> RenderedImage:
         last_error: Exception | None = None
-        model_name = self._pick_upscale_model(query, candidate)
         for url in candidate.download_urls():
             try:
                 payload = await self._fetch_bytes(url)
+                model_name = await self._select_upscale_model(query, candidate, payload)
                 try:
                     return await asyncio.to_thread(
                         upscale_with_realesrgan,
@@ -520,6 +595,7 @@ class ImageOps(commands.Cog):
                         binary_path=REAL_ESRGAN_BINARY,
                         model_dir=REAL_ESRGAN_MODEL_DIR,
                         model_name=model_name,
+                        scale=UPSCALE_MODEL_SCALES.get(model_name, 4),
                     )
                 except Exception as exc:
                     logger.warning("Real-ESRGAN unavailable, using fallback upscale: %s", exc)

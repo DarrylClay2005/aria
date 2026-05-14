@@ -691,7 +691,22 @@ class SwarmAdmin(commands.Cog):
 
     @swarm_group.command(name="filter", description="Set the audio filter for a specific bot or the whole swarm.")
     @app_commands.choices(drone=DRONES)
-    @app_commands.choices(filter_type=[app_commands.Choice(name="High Quality (Unfiltered)", value="none"), app_commands.Choice(name="Nightcore (Fast/High Pitch)", value="nightcore"), app_commands.Choice(name="Vaporwave (Slow/Reverb)", value="vaporwave"), app_commands.Choice(name="Bassboost", value="bassboost"), app_commands.Choice(name="8D Audio (Panning)", value="8d")])
+    @app_commands.choices(filter_type=[
+        app_commands.Choice(name="High Quality (Unfiltered)", value="none"),
+        app_commands.Choice(name="Nightcore", value="nightcore"),
+        app_commands.Choice(name="Vaporwave", value="vaporwave"),
+        app_commands.Choice(name="Bassboost", value="bassboost"),
+        app_commands.Choice(name="8D Audio", value="8d"),
+        app_commands.Choice(name="Karaoke", value="karaoke"),
+        app_commands.Choice(name="Tremolo", value="tremolo"),
+        app_commands.Choice(name="Vibrato", value="vibrato"),
+        app_commands.Choice(name="Low Pass", value="lowpass"),
+        app_commands.Choice(name="Lo-fi", value="lofi"),
+        app_commands.Choice(name="Electronic", value="electronic"),
+        app_commands.Choice(name="Party", value="party"),
+        app_commands.Choice(name="Radio", value="radio"),
+        app_commands.Choice(name="Cinema", value="cinema"),
+    ])
     async def filter_cmd(self, interaction: discord.Interaction, filter_type: app_commands.Choice[str], drone: app_commands.Choice[str] = None):
         await interaction.response.defer(ephemeral=True)
         bots = [drone.value] if drone else DRONE_NAMES
