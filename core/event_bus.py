@@ -15,15 +15,16 @@ except ImportError:  # pragma: no cover
     aiomysql = None
 
 from core.database import db
+from core.swarm_control import DRONE_NAMES as SWARM_DRONE_NAMES, schema_for_drone
 
 logger = logging.getLogger("aria.event_bus")
 LEADING_GUILD_ID_RE = re.compile(r"^\[(\d{6,})\]")
 LAVALINK_QUERY_RE = re.compile(r"search failed for '([^']+)'", re.IGNORECASE)
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
+DRONE_NAMES = list(SWARM_DRONE_NAMES)
 BOT_SCHEMAS = {
     drone: {
-        "schema": f"discord_music_{drone}",
+        "schema": schema_for_drone(drone),
         "queue": f"{drone}_queue",
         "backup": f"{drone}_queue_backup",
         "playback": f"{drone}_playback_state",

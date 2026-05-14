@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
 
 from core.database import db
 from core.learning import LearningEngine
-from core.swarm_control import DRONE_NAMES
+from core.swarm_control import DRONE_NAMES, schema_for_drone
 from core.webhooks import send_error_webhook_log, send_ops_webhook_log, send_webhook_log
 
 logger = logging.getLogger("Autonomy")
@@ -24,7 +24,7 @@ logger = logging.getLogger("Autonomy")
 
 BOT_SCHEMAS = {
     drone: {
-        "schema": f"discord_music_{drone}",
+        "schema": schema_for_drone(drone),
         "queue": f"{drone}_queue",
         "backup": f"{drone}_queue_backup",
         "playback": f"{drone}_playback_state",

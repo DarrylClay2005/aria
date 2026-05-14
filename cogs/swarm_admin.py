@@ -7,12 +7,12 @@ import random
 from typing import Any
 
 from core.database import db
-from core.swarm_control import ensure_guild_settings_schema, ensure_music_intelligence_schema, smart_query_from_title
+from core.swarm_control import ensure_guild_settings_schema, ensure_music_intelligence_schema, schema_for_drone, smart_query_from_title
 from core.webhooks import send_webhook_log
 
 logger = logging.getLogger("discord")
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
+DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire", "strife", "lockhart"]
 DRONES = [app_commands.Choice(name=d.capitalize(), value=d) for d in DRONE_NAMES]
 VALID_COMMANDS = {"PLAY", "PAUSE", "RESUME", "SKIP", "STOP", "RESTART", "RECOVER", "LEAVE", "UPDATE_FILTER"}
 
@@ -20,7 +20,7 @@ VALID_COMMANDS = {"PLAY", "PAUSE", "RESUME", "SKIP", "STOP", "RESTART", "RECOVER
 def _db_name(bot_name: str) -> str:
     if bot_name not in DRONE_NAMES:
         raise ValueError(f"Unknown swarm node: {bot_name}")
-    return f"discord_music_{bot_name}"
+    return schema_for_drone(bot_name)
 
 
 def _q(bot_name: str, table_suffix: str) -> str:
@@ -28,7 +28,7 @@ def _q(bot_name: str, table_suffix: str) -> str:
         raise ValueError(f"Unknown swarm node: {bot_name}")
     if not table_suffix.replace("_", "").isalnum():
         raise ValueError(f"Unsafe table suffix: {table_suffix}")
-    return f"`discord_music_{bot_name}`.`{bot_name}_{table_suffix}`"
+    return f"`{_db_name(bot_name)}`.`{bot_name}_{table_suffix}`"
 
 
 async def _table_exists(cur, bot_name: str, table_suffix: str) -> bool:

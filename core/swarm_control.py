@@ -15,7 +15,18 @@ from core.database import db
 from core.override import override_manager
 
 
-DRONE_NAMES = ("gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire")
+DRONE_NAMES = ("gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire", "strife", "lockhart")
+DRONE_SCHEMA_OVERRIDES = {
+    "strife": os.getenv("ARIA_STRIFE_DB_SCHEMA", "discord_music") or "discord_music",
+    "lockhart": os.getenv("ARIA_LOCKHART_DB_SCHEMA", "discord_music") or "discord_music",
+}
+
+
+def schema_for_drone(bot_name: str) -> str:
+    cleaned = str(bot_name or "").strip().lower()
+    if cleaned not in DRONE_NAMES:
+        raise ValueError(f"Unknown swarm node: {bot_name}")
+    return DRONE_SCHEMA_OVERRIDES.get(cleaned, f"discord_music_{cleaned}")
 FILTER_ALIASES = {
     "none": "none",
     "unfiltered": "none",
@@ -188,7 +199,7 @@ async def ensure_direct_order_schema(cur, bot_name: str) -> None:
 async def _ensure_direct_order_schema_uncached(cur, bot_name: str) -> None:
     await cur.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_direct_orders (
+        CREATE TABLE IF NOT EXISTS {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders (
             id BIGINT AUTO_INCREMENT PRIMARY KEY,
             bot_name VARCHAR(50) NOT NULL,
             guild_id BIGINT NOT NULL,
@@ -206,17 +217,17 @@ async def _ensure_direct_order_schema_uncached(cur, bot_name: str) -> None:
         """
     )
     for stmt in (
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN vc_id BIGINT NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN text_channel_id BIGINT NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN command VARCHAR(50) NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN data TEXT NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN attempts INT NOT NULL DEFAULT 0",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN last_error TEXT NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN claimed_at TIMESTAMP NULL",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
-        f"ALTER TABLE discord_music_{bot_name}.{bot_name}_swarm_direct_orders ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN vc_id BIGINT NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN text_channel_id BIGINT NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN command VARCHAR(50) NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN data TEXT NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN attempts INT NOT NULL DEFAULT 0",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN last_error TEXT NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN claimed_at TIMESTAMP NULL",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
+        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
     ):
         try:
             await cur.execute(stmt)
@@ -229,11 +240,11 @@ async def insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | No
     await ensure_direct_order_schema(cur, bot_name)
     if dedupe:
         await cur.execute(
-            f"DELETE FROM discord_music_{bot_name}.{bot_name}_swarm_direct_orders WHERE bot_name = %s AND guild_id = %s AND command = %s",
+            f"DELETE FROM {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders WHERE bot_name = %s AND guild_id = %s AND command = %s",
             (bot_name, int(guild_id or 0), command),
         )
     await cur.execute(
-        f"INSERT INTO discord_music_{bot_name}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
+        f"INSERT INTO {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
         (bot_name, int(guild_id or 0), vc_id if vc_id else None, text_channel_id if text_channel_id else None, command, data or ""),
     )
     invalidate_swarm_route_cache(guild_id)
@@ -261,13 +272,13 @@ async def ensure_guild_settings_schema(cur, bot_name: str) -> None:
 
 async def _ensure_guild_settings_schema_uncached(cur, bot_name: str) -> None:
     await cur.execute(
-        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_guild_settings "
+        f"CREATE TABLE IF NOT EXISTS {schema_for_drone(bot_name)}.{bot_name}_guild_settings "
         "(guild_id BIGINT PRIMARY KEY)"
     )
     for column_name, definition in GUILD_SETTINGS_COLUMNS:
         try:
             await cur.execute(
-                f"ALTER TABLE discord_music_{bot_name}.{bot_name}_guild_settings "
+                f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_guild_settings "
                 f"ADD COLUMN {column_name} {definition}"
             )
         except Exception:
@@ -295,7 +306,7 @@ async def ensure_music_intelligence_schema(cur, bot_name: str) -> None:
 
 
 async def _ensure_music_intelligence_schema_uncached(cur, bot_name: str) -> None:
-    schema = f"discord_music_{bot_name}"
+    schema = schema_for_drone(bot_name)
     await cur.execute(
         f"CREATE TABLE IF NOT EXISTS {schema}.{bot_name}_track_intelligence ("
         "guild_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, "
@@ -363,7 +374,7 @@ class SwarmController:
                         # FIX: only consider a drone "active" if it is actually playing,
                         # not merely paused or stopped with a stale playback_state row.
                         await cur.execute(
-                            f"SELECT guild_id FROM discord_music_{drone}.{drone}_playback_state"
+                            f"SELECT guild_id FROM {schema_for_drone(drone)}.{drone}_playback_state"
                             f" WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
                             (guild_id,),
                         )
@@ -388,7 +399,7 @@ class SwarmController:
                 for candidate in DRONE_NAMES:
                     try:
                         await cur.execute(
-                            f"SELECT channel_id FROM discord_music_{candidate}.{candidate}_playback_state WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
+                            f"SELECT channel_id FROM {schema_for_drone(candidate)}.{candidate}_playback_state WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
                             (guild_id,),
                         )
                         row = await cur.fetchone()
@@ -401,7 +412,7 @@ class SwarmController:
                     for candidate in DRONE_NAMES:
                         try:
                             await cur.execute(
-                                f"SELECT home_vc_id FROM discord_music_{candidate}.{candidate}_bot_home_channels WHERE guild_id = %s LIMIT 1",
+                                f"SELECT home_vc_id FROM {schema_for_drone(candidate)}.{candidate}_bot_home_channels WHERE guild_id = %s LIMIT 1",
                                 (guild_id,),
                             )
                             row = await cur.fetchone()
@@ -461,10 +472,10 @@ class SwarmController:
             async with conn.cursor() as cur:
                 for bot_name in targets:
                     await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
+                        f"CREATE TABLE IF NOT EXISTS {schema_for_drone(bot_name)}.{bot_name}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
                     )
                     await cur.execute(
-                        f"REPLACE INTO discord_music_{bot_name}.{bot_name}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                        f"REPLACE INTO {schema_for_drone(bot_name)}.{bot_name}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)",
                         (guild_id, bot_name, command),
                     )
 
@@ -546,7 +557,7 @@ class SwarmController:
                 for bot_name in DRONE_NAMES:
                     try:
                         await cur.execute(
-                            f"SELECT home_vc_id FROM discord_music_{bot_name}.{bot_name}_bot_home_channels WHERE guild_id = %s LIMIT 1",
+                            f"SELECT home_vc_id FROM {schema_for_drone(bot_name)}.{bot_name}_bot_home_channels WHERE guild_id = %s LIMIT 1",
                             (guild_id,),
                         )
                         row = await cur.fetchone()
@@ -584,7 +595,7 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT home_vc_id FROM discord_music_{drone}.{drone}_bot_home_channels WHERE guild_id = %s LIMIT 1",
+                        f"SELECT home_vc_id FROM {schema_for_drone(drone)}.{drone}_bot_home_channels WHERE guild_id = %s LIMIT 1",
                         (guild_id,),
                     )
                     row = await cur.fetchone()
@@ -612,10 +623,10 @@ class SwarmController:
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_bot_home_channels (guild_id BIGINT, bot_name VARCHAR(50), home_vc_id BIGINT, PRIMARY KEY (guild_id, bot_name))"
+                    f"CREATE TABLE IF NOT EXISTS {schema_for_drone(bot_name)}.{bot_name}_bot_home_channels (guild_id BIGINT, bot_name VARCHAR(50), home_vc_id BIGINT, PRIMARY KEY (guild_id, bot_name))"
                 )
                 await cur.execute(
-                    f"REPLACE INTO discord_music_{bot_name}.{bot_name}_bot_home_channels (guild_id, bot_name, home_vc_id) VALUES (%s, %s, %s)",
+                    f"REPLACE INTO {schema_for_drone(bot_name)}.{bot_name}_bot_home_channels (guild_id, bot_name, home_vc_id) VALUES (%s, %s, %s)",
                     (guild.id, bot_name, channel.id),
                 )
         invalidate_swarm_route_cache(guild.id)
@@ -643,7 +654,7 @@ class SwarmController:
                 for bot_name in targets:
                     await ensure_guild_settings_schema(cur, bot_name)
                     await cur.execute(
-                        f"INSERT INTO discord_music_{bot_name}.{bot_name}_guild_settings (guild_id, loop_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE loop_mode = %s",
+                        f"INSERT INTO {schema_for_drone(bot_name)}.{bot_name}_guild_settings (guild_id, loop_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE loop_mode = %s",
                         (guild_id, mode_name, mode_name),
                     )
         target_label = f"`{targets[0]}`" if len(targets) == 1 else "the whole swarm"
@@ -664,7 +675,7 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC LIMIT 10",
+                        f"SELECT title FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC LIMIT 10",
                         (guild_id, bot_name),
                     )
                     rows = await cur.fetchall()
@@ -706,7 +717,7 @@ class SwarmController:
                                    COALESCE(SUM(skip_count), 0) AS skips,
                                    COALESCE(SUM(like_count), 0) AS likes,
                                    COALESCE(SUM(dislike_count), 0) AS dislikes
-                            FROM discord_music_{bot_name}.{bot_name}_track_intelligence
+                            FROM {schema_for_drone(bot_name)}.{bot_name}_track_intelligence
                             WHERE guild_id = %s
                             """,
                             (guild_id,),
@@ -716,7 +727,7 @@ class SwarmController:
                             f"""
                             SELECT title, video_url, play_count, finish_count, skip_count, like_count, dislike_count,
                                    ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score
-                            FROM discord_music_{bot_name}.{bot_name}_track_intelligence
+                            FROM {schema_for_drone(bot_name)}.{bot_name}_track_intelligence
                             WHERE guild_id = %s
                             ORDER BY smart_score DESC, updated_at DESC
                             LIMIT 3
@@ -728,7 +739,7 @@ class SwarmController:
                             f"""
                             SELECT user_id, COUNT(*) AS track_count, COALESCE(SUM(score), 0) AS taste_score,
                                    COALESCE(SUM(like_count), 0) AS likes, COALESCE(SUM(dislike_count), 0) AS dislikes
-                            FROM discord_music_{bot_name}.{bot_name}_user_track_affinity
+                            FROM {schema_for_drone(bot_name)}.{bot_name}_user_track_affinity
                             WHERE guild_id = %s
                             GROUP BY user_id
                             ORDER BY taste_score DESC, likes DESC
@@ -738,7 +749,7 @@ class SwarmController:
                         )
                         top_users = await cur.fetchall() or []
                         await cur.execute(
-                            f"SELECT COUNT(*) AS recommendation_count, MAX(created_at) AS last_recommended FROM discord_music_{bot_name}.{bot_name}_smart_recommendations WHERE guild_id = %s",
+                            f"SELECT COUNT(*) AS recommendation_count, MAX(created_at) AS last_recommended FROM {schema_for_drone(bot_name)}.{bot_name}_smart_recommendations WHERE guild_id = %s",
                             (guild_id,),
                         )
                         rec_row = await cur.fetchone() or {}
@@ -813,7 +824,7 @@ class SwarmController:
                     await cur.execute(
                         f"""
                         SELECT title, video_url, score, like_count, dislike_count
-                        FROM discord_music_{target_drone}.{target_drone}_user_track_affinity
+                        FROM {schema_for_drone(target_drone)}.{target_drone}_user_track_affinity
                         WHERE guild_id = %s AND user_id = %s AND dislike_count <= like_count
                         ORDER BY score DESC, last_requested DESC
                         LIMIT 1
@@ -828,7 +839,7 @@ class SwarmController:
                         f"""
                         SELECT title, video_url,
                                ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS score
-                        FROM discord_music_{target_drone}.{target_drone}_track_intelligence
+                        FROM {schema_for_drone(target_drone)}.{target_drone}_track_intelligence
                         WHERE guild_id = %s AND dislike_count <= like_count
                         ORDER BY score DESC, updated_at DESC
                         LIMIT 1
@@ -844,7 +855,7 @@ class SwarmController:
                 payload = self.normalize_query(f"{query_text} radio")
                 await cur.execute(
                     f"""
-                    INSERT INTO discord_music_{target_drone}.{target_drone}_smart_recommendations
+                    INSERT INTO {schema_for_drone(target_drone)}.{target_drone}_smart_recommendations
                     (guild_id, requester_id, seed_title, seed_url, query_text, chosen_url, chosen_title, reason)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
@@ -885,7 +896,7 @@ class SwarmController:
                 for bot_name in targets:
                     try:
                         await cur.execute(
-                            f"SELECT * FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s",
+                            f"SELECT * FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s",
                             (guild_id, bot_name),
                         )
                         tracks = await cur.fetchall()
@@ -895,10 +906,10 @@ class SwarmController:
                         continue
 
                     random.shuffle(tracks)
-                    await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s", (guild_id, bot_name))
+                    await cur.execute(f"DELETE FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s", (guild_id, bot_name))
                     for track in tracks:
                         await cur.execute(
-                            f"INSERT INTO discord_music_{bot_name}.{bot_name}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",
+                            f"INSERT INTO {schema_for_drone(bot_name)}.{bot_name}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",
                             (track["guild_id"], track["bot_name"], track["video_url"], track["title"], track["requester_id"]),
                         )
                     shuffled.append(bot_name)
@@ -923,7 +934,7 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT id, title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC",
+                        f"SELECT id, title FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC",
                         (guild_id, bot_name),
                     )
                     rows = await cur.fetchall()
@@ -934,7 +945,7 @@ class SwarmController:
                     return f"`{bot_name}` only has {len(rows)} tracks queued."
 
                 target = rows[track_number - 1]
-                await cur.execute(f"DELETE FROM discord_music_{bot_name}.{bot_name}_queue WHERE id = %s AND guild_id = %s AND bot_name = %s", (target["id"], guild_id, bot_name))
+                await cur.execute(f"DELETE FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE id = %s AND guild_id = %s AND bot_name = %s", (target["id"], guild_id, bot_name))
         return f"Removed track {track_number} from `{bot_name}`: {target['title']}."
 
     async def set_filter(self, ctx, filter_type: str, *, drone: str | None = None) -> str:
@@ -959,14 +970,14 @@ class SwarmController:
                 for bot_name in targets:
                     await ensure_guild_settings_schema(cur, bot_name)
                     await cur.execute(
-                        f"INSERT INTO discord_music_{bot_name}.{bot_name}_guild_settings (guild_id, filter_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE filter_mode = %s",
+                        f"INSERT INTO {schema_for_drone(bot_name)}.{bot_name}_guild_settings (guild_id, filter_mode) VALUES (%s, %s) ON DUPLICATE KEY UPDATE filter_mode = %s",
                         (guild_id, normalized, normalized),
                     )
                     await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS discord_music_{bot_name}.{bot_name}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
+                        f"CREATE TABLE IF NOT EXISTS {schema_for_drone(bot_name)}.{bot_name}_swarm_overrides (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
                     )
                     await cur.execute(
-                        f"REPLACE INTO discord_music_{bot_name}.{bot_name}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                        f"REPLACE INTO {schema_for_drone(bot_name)}.{bot_name}_swarm_overrides (guild_id, bot_name, command) VALUES (%s, %s, %s)",
                         (guild_id, bot_name, "UPDATE_FILTER"),
                     )
 
@@ -989,9 +1000,9 @@ class SwarmController:
                             SELECT
                                 p.guild_id,
                                 p.is_playing,
-                                (SELECT title FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 1) AS next_title,
-                                (SELECT COUNT(*) FROM discord_music_{bot_name}.{bot_name}_queue WHERE guild_id = %s) AS q_len
-                            FROM discord_music_{bot_name}.{bot_name}_playback_state p
+                                (SELECT title FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 1) AS next_title,
+                                (SELECT COUNT(*) FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s) AS q_len
+                            FROM {schema_for_drone(bot_name)}.{bot_name}_playback_state p
                             WHERE p.guild_id = %s
                             LIMIT 1
                             """,
@@ -1020,7 +1031,7 @@ class SwarmController:
                 for bot_name in DRONE_NAMES:
                     try:
                         await cur.execute(
-                            f"SELECT title FROM discord_music_{bot_name}.{bot_name}_history WHERE guild_id = %s",
+                            f"SELECT title FROM {schema_for_drone(bot_name)}.{bot_name}_history WHERE guild_id = %s",
                             (guild_id,),
                         )
                         rows = await cur.fetchall()
@@ -1052,7 +1063,7 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 try:
                     await cur.execute(
-                        f"SELECT * FROM discord_music_{bot_name}.{bot_name}_queue_backup WHERE guild_id = %s ORDER BY id DESC LIMIT 20",
+                        f"SELECT * FROM {schema_for_drone(bot_name)}.{bot_name}_queue_backup WHERE guild_id = %s ORDER BY id DESC LIMIT 20",
                         (guild_id,),
                     )
                     backups = await cur.fetchall()
@@ -1064,7 +1075,7 @@ class SwarmController:
 
                 for track in reversed(backups):
                     await cur.execute(
-                        f"INSERT INTO discord_music_{bot_name}.{bot_name}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",
+                        f"INSERT INTO {schema_for_drone(bot_name)}.{bot_name}_queue (guild_id, bot_name, video_url, title, requester_id) VALUES (%s, %s, %s, %s, %s)",
                         (track["guild_id"], bot_name, track["video_url"], track["title"], requester.id if requester else 0),
                     )
 

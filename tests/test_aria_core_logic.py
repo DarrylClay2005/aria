@@ -69,6 +69,15 @@ class IntentParserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0]["data"]["drone"], "gws")
         self.assertEqual(results[1]["data"]["drone"], "melodic")
 
+    async def test_parse_new_strife_and_lockhart_drones(self) -> None:
+        play = await self.parser.parse("tell strife to play final fantasy battle theme")
+        filters = await self.parser.parse("filter vaporwave on lockhart")
+
+        self.assertEqual(play["action"], "play")
+        self.assertEqual(play["data"]["drone"], "strife")
+        self.assertEqual(filters["action"], "swarm_filter")
+        self.assertEqual(filters["data"]["drone"], "lockhart")
+
     async def test_non_control_prompt_stays_unknown(self) -> None:
         result = await self.parser.parse("stop insulting me for five seconds")
 

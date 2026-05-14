@@ -13,12 +13,12 @@ from core.chat_attachments import (
     prepare_chat_uploads,
 )
 from core.database import db
-from core.swarm_control import insert_direct_order
+from core.swarm_control import insert_direct_order, schema_for_drone
 from core.webhooks import send_error_webhook_log
 
 logger = logging.getLogger("discord")
 
-DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire"]
+DRONE_NAMES = ["gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire", "strife", "lockhart"]
 FILE_REQUEST_RE = re.compile(r"\b(updated|fixed|corrected|patched)\s+(file|code)\b|\b(send|upload|return|give)\b.*\b(file|code|it)\b", re.IGNORECASE)
 AFFIRM_ONLY_RE = re.compile(r"^(yes|yeah|yep|sure|please do|do it|send it|upload it|return it|i would|yes please)\b", re.IGNORECASE)
 class AICore(commands.Cog):
@@ -276,7 +276,7 @@ class AICore(commands.Cog):
                         for d in DRONE_NAMES:
                             try:
                                 await cur.execute(
-                                    f"SELECT channel_id FROM discord_music_{d}.{d}_playback_state "
+                                    f"SELECT channel_id FROM {schema_for_drone(d)}.{d}_playback_state "
                                     f"WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
                                     (interaction.guild_id,),
                                 )
@@ -292,7 +292,7 @@ class AICore(commands.Cog):
                             for d in DRONE_NAMES:
                                 try:
                                     await cur.execute(
-                                        f"SELECT home_vc_id FROM discord_music_{d}.{d}_bot_home_channels "
+                                        f"SELECT home_vc_id FROM {schema_for_drone(d)}.{d}_bot_home_channels "
                                         f"WHERE guild_id = %s",
                                         (interaction.guild_id,),
                                     )
