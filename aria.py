@@ -20,6 +20,13 @@ from core.telegram_bridge import TelegramBridge
 from core.webhooks import close_http_session, install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
 
+TELEGRAM_CHAT_SYSTEM_INSTRUCTION = (
+    DEFAULT_CHAT_SYSTEM_INSTRUCTION
+    + "\nYou are replying from Aria's Telegram bridge. Keep the same Aria voice users know from Discord: warm, sharp, a little sly, and direct. "
+    "Do not sound like a generic bot menu unless the user explicitly asks for a plain status readout. "
+    "Telegram replies should be compact, conversational, and useful without losing your personality."
+)
+
 # --- LOGGING SETUP ---
 file_handler = logging.FileHandler(filename="aria_core.log", encoding="utf-8", mode="a")
 discord.utils.setup_logging(handler=file_handler, level=logging.INFO)
@@ -127,8 +134,8 @@ class AriaBot(commands.Bot):
 
         if command in {"/start", "/help"}:
             return (
-                "Aria is connected to Telegram.\n"
-                "Send any message to chat, use /chat <prompt> for explicit chat, /status for runtime status, or /id to see this chat id."
+                "I'm here on Telegram now. Send me anything and I'll answer like Aria, not like a help-desk toaster.\n"
+                "/chat <prompt> for explicit chat, /status for runtime, /id for this chat id."
             )
         if command == "/id":
             return f"Telegram chat id: {chat_id}"
@@ -137,7 +144,7 @@ class AriaBot(commands.Bot):
             telegram_status = self.telegram_bridge.status if self.telegram_bridge else None
             username = telegram_status.bot_username if telegram_status else ""
             return (
-                "Aria Telegram status\n"
+                "Aria Telegram status, clean and sharp:\n"
                 f"Discord: {'online' if self.is_ready() else 'starting'}\n"
                 f"Database: {'connected' if db.is_connected else 'not connected'}\n"
                 f"Autonomous monitor: {'running' if monitor_live else 'stopped'}\n"
@@ -166,7 +173,7 @@ class AriaBot(commands.Bot):
                     return routed
             return await self.aria_core.chat(
                 maybe_command,
-                system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
+                system_instruction=TELEGRAM_CHAT_SYSTEM_INSTRUCTION,
                 user_id=user_id,
                 guild_id=None,
                 user_name=user_name,
