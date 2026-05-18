@@ -41,6 +41,7 @@ class AriaBot(commands.Bot):
         self.event_bus = EventBus(self)
         self.monitor = Monitor(self, self.event_bus)
         self.monitor_task = None
+        self.heartbeat_task = None
         self.telegram_bridge = None
         self.aria_chat_semaphore = asyncio.Semaphore(max(1, int(os.getenv("ARIA_CHAT_CONCURRENCY", "3") or "3")))
         self._last_ready_webhook_at = 0.0
@@ -51,6 +52,7 @@ class AriaBot(commands.Bot):
         db.patch_legacy_create_pool()
         await self.aria_core.initialize()
         await self.event_bus.initialize()
+        await self.ensure_heartbeat_schema()
 
         if not COGS_DIR.exists():
             COGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,6 +115,18 @@ class AriaBot(commands.Bot):
         # 🟢 Cleanly close long-lived resources when the bot shuts down.
         if self.telegram_bridge:
             await self.telegram_bridge.close()
+        if self.heartbeat_task and not self.heartbeat_task.done():
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Aria heartbeat task raised while shutting down.")
+        try:
+            await self.write_heartbeat("offline")
+        except Exception:
+            logger.exception("Failed to mark Aria heartbeat offline during shutdown.")
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
             try:
@@ -124,6 +138,50 @@ class AriaBot(commands.Bot):
         await close_http_session()
         await db.close()
         await super().close()
+
+    async def ensure_heartbeat_schema(self):
+        if not db.pool:
+            return
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS swarm_health (
+                        bot_name VARCHAR(50) PRIMARY KEY,
+                        status VARCHAR(50) NOT NULL DEFAULT 'online',
+                        last_pulse TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            ON UPDATE CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+
+    async def write_heartbeat(self, status: str = "online"):
+        if not db.pool:
+            return
+        await self.ensure_heartbeat_schema()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO swarm_health (bot_name, status, last_pulse)
+                    VALUES ('aria', %s, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        status = VALUES(status),
+                        last_pulse = VALUES(last_pulse)
+                    """,
+                    (status,),
+                )
+
+    async def heartbeat_loop(self):
+        interval = max(10.0, float(os.getenv("ARIA_HEARTBEAT_INTERVAL_SECONDS", "30") or "30"))
+        while not self.is_closed():
+            try:
+                await self.write_heartbeat("online")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Aria heartbeat update failed.")
+            await asyncio.sleep(interval)
 
     # ARIA LIVE DATA FIX: Telegram needs a Discord guild context to read queues.
     def _resolve_telegram_guild(self, chat_id: int | None = None):
@@ -365,7 +423,7 @@ class AriaBot(commands.Bot):
             prompt = _arg
         if not prompt:
             return "Give me a prompt after /chat."
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+        fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
         maybe_command = prompt[5:].strip() if prompt.lower().startswith("aria ") else prompt
 
         try:
@@ -439,6 +497,10 @@ async def on_ready():
             else:
                 logger.info("Aria monitor task finished; recreating it after reconnect.")
         bot.monitor_task = asyncio.create_task(bot.monitor.start(), name="aria-monitor")
+
+    heartbeat_task = bot.heartbeat_task
+    if heartbeat_task is None or heartbeat_task.done():
+        bot.heartbeat_task = asyncio.create_task(bot.heartbeat_loop(), name="aria-heartbeat")
 
 
 async def send_discord_safely(channel, text: str, *, limit: int = 1900):
