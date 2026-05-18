@@ -10,7 +10,7 @@ from discord import app_commands
 # ================================
 # 🧠 ARIA SYSTEM IMPORTS
 # ================================
-from aria.aria_core import AriaCore, DISCORD_CHAT_SYSTEM_INSTRUCTION, TELEGRAM_CHAT_SYSTEM_INSTRUCTION
+from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from aria.aria_monitor import Monitor
 from core.override import override_manager
 from core.database import db
@@ -19,6 +19,13 @@ from core.settings import BOT_ENV_PREFIX, COGS_DIR, OVERRIDE_USER_ID, TELEGRAM_A
 from core.telegram_bridge import TelegramBridge
 from core.webhooks import close_http_session, install_error_reporting, install_loop_exception_handler, send_error_webhook_log, send_webhook_log
 from core.event_bus import EventBus
+
+TELEGRAM_CHAT_SYSTEM_INSTRUCTION = (
+    DEFAULT_CHAT_SYSTEM_INSTRUCTION
+    + "\nYou are replying from Aria's Telegram bridge. Keep the same Aria voice users know from Discord: warm, sharp, a little sly, and direct. "
+    "Do not sound like a generic bot menu unless the user explicitly asks for a plain status readout. "
+    "Telegram replies should be compact, conversational, and useful without losing your personality."
+)
 
 # --- LOGGING SETUP ---
 file_handler = logging.FileHandler(filename="aria_core.log", encoding="utf-8", mode="a")
@@ -125,87 +132,6 @@ class AriaBot(commands.Bot):
         await db.close()
         await super().close()
 
-    # ARIA LIVE DATA FIX: Telegram needs a Discord guild context to read queues.
-    def _resolve_telegram_guild(self, chat_id: int | None = None):
-        env_keys = (
-            "ARIA_TELEGRAM_DEFAULT_GUILD_ID",
-            "TELEGRAM_DEFAULT_GUILD_ID",
-            "ARIA_DEFAULT_GUILD_ID",
-            "DISCORD_GUILD_ID",
-        )
-        for key in env_keys:
-            raw = str(os.getenv(key, "") or "").strip()
-            if not raw:
-                continue
-            try:
-                guild_id = int(raw)
-            except ValueError:
-                continue
-            guild = self.get_guild(guild_id)
-            return guild, guild_id
-
-        guilds = list(getattr(self, "guilds", []) or [])
-        if len(guilds) == 1:
-            return guilds[0], int(guilds[0].id)
-        return (guilds[0], int(guilds[0].id)) if guilds else (None, None)
-
-    def _telegram_chat_is_trusted(self, chat_id: int | None) -> bool:
-        try:
-            normalized = int(chat_id or 0)
-        except (TypeError, ValueError):
-            normalized = 0
-        bridge_allowed = set(getattr(self.telegram_bridge, "allowed_chat_ids", set()) or set()) if self.telegram_bridge else set()
-        if bridge_allowed:
-            return normalized in bridge_allowed
-        raw_admins = str(os.getenv("ARIA_TELEGRAM_ADMIN_CHAT_IDS", "") or "")
-        if raw_admins:
-            allowed = set()
-            for chunk in raw_admins.replace(";", ",").split(","):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                try:
-                    allowed.add(int(chunk))
-                except ValueError:
-                    pass
-            return normalized in allowed
-        return str(os.getenv("ARIA_TELEGRAM_TRUST_ALL_CHATS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-
-    def _telegram_fake_context(self, chat_id: int, user_id: int, user_name: str):
-        guild, guild_id = self._resolve_telegram_guild(chat_id)
-        channel_id_raw = str(os.getenv("ARIA_TELEGRAM_DEFAULT_CHANNEL_ID", "") or "").strip()
-        vc_id_raw = str(os.getenv("ARIA_TELEGRAM_DEFAULT_VC_ID", "") or "").strip()
-        try:
-            channel_id = int(channel_id_raw) if channel_id_raw else None
-        except ValueError:
-            channel_id = None
-        try:
-            vc_id = int(vc_id_raw) if vc_id_raw else None
-        except ValueError:
-            vc_id = None
-
-        voice_channel = SimpleNamespace(id=vc_id) if vc_id else None
-        voice_state = SimpleNamespace(channel=voice_channel) if voice_channel else None
-        fake_actor = SimpleNamespace(
-            id=int(user_id or 0),
-            display_name=user_name,
-            name=user_name,
-            bot=False,
-            voice=voice_state,
-            guild_permissions=SimpleNamespace(administrator=self._telegram_chat_is_trusted(chat_id)),
-        )
-        fake_channel = SimpleNamespace(id=channel_id) if channel_id else None
-        return SimpleNamespace(
-            author=fake_actor,
-            user=fake_actor,
-            guild=guild,
-            guild_id=guild_id,
-            channel=fake_channel,
-            channel_id=channel_id,
-            bot=self,
-            client=self,
-        )
-
     async def handle_telegram_update(self, event: dict) -> str | None:
         text = str(event.get("text") or "").strip()
         if not text:
@@ -256,7 +182,8 @@ class AriaBot(commands.Bot):
             if not _arg:
                 return "Give me something to play. /play <song or query>"
             prompt = f"play {_arg}"
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -270,7 +197,8 @@ class AriaBot(commands.Bot):
         if command in {"/pause", "/resume", "/skip", "/stop"}:
             action = command.lstrip("/")
             prompt = f"{action} {_arg}".strip() if _arg else action
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -283,7 +211,8 @@ class AriaBot(commands.Bot):
 
         if command == "/queue":
             prompt = f"queue {_arg}".strip() if _arg else "queue"
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -296,7 +225,8 @@ class AriaBot(commands.Bot):
 
         if command == "/shuffle":
             prompt = f"shuffle {_arg}".strip() if _arg else "shuffle"
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -311,7 +241,8 @@ class AriaBot(commands.Bot):
             if not _arg:
                 return "Tell me what to broadcast. /broadcast <query>"
             prompt = f"broadcast {_arg}"
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -323,7 +254,8 @@ class AriaBot(commands.Bot):
                 self.aria_chat_semaphore.release()
 
         if command == "/radar":
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -336,7 +268,8 @@ class AriaBot(commands.Bot):
 
         if command == "/recommend":
             prompt = f"recommend {_arg}".strip() if _arg else "recommend"
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -348,7 +281,8 @@ class AriaBot(commands.Bot):
                 self.aria_chat_semaphore.release()
 
         if command == "/heal":
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+            fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+            fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
             try:
                 await asyncio.wait_for(self.aria_chat_semaphore.acquire(), timeout=0.25)
             except TimeoutError:
@@ -365,7 +299,9 @@ class AriaBot(commands.Bot):
             prompt = _arg
         if not prompt:
             return "Give me a prompt after /chat."
-            fake_ctx = self._telegram_fake_context(chat_id, user_id, user_name)
+
+        fake_actor = SimpleNamespace(id=user_id, display_name=user_name, name=user_name, bot=False)
+        fake_ctx = SimpleNamespace(author=fake_actor, user=fake_actor, guild=None, guild_id=None)
         maybe_command = prompt[5:].strip() if prompt.lower().startswith("aria ") else prompt
 
         try:
@@ -374,14 +310,15 @@ class AriaBot(commands.Bot):
             return "I am already handling a few Aria requests. Try again in a moment."
 
         try:
-            routed = await self.aria_core.handle(fake_ctx, maybe_command)
-            if routed:
-                return routed
+            if prompt.lower().startswith("aria "):
+                routed = await self.aria_core.handle(fake_ctx, maybe_command)
+                if routed:
+                    return routed
             return await self.aria_core.chat(
                 maybe_command,
                 system_instruction=TELEGRAM_CHAT_SYSTEM_INSTRUCTION,
                 user_id=user_id,
-                guild_id=getattr(fake_ctx, "guild_id", None),
+                guild_id=None,
                 user_name=user_name,
                 source_kind="telegram_chat",
                 response_style="telegram_chat",
@@ -534,10 +471,9 @@ async def on_message(message):
         try:
             reply = await bot.aria_core.chat(
             contextual_prompt,
-            system_instruction=DISCORD_CHAT_SYSTEM_INSTRUCTION,
+            system_instruction=DEFAULT_CHAT_SYSTEM_INSTRUCTION,
             user_id=message.author.id,
             guild_id=message.guild.id if message.guild else None,
-            channel_id=message.channel.id if message.channel else None,
             user_name=message.author.display_name,
             source_kind="prefix_chat",
             response_style="prefix_chat",

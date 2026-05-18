@@ -80,23 +80,6 @@ class IntentParser:
         if match:
             return {"action": "swarm_queue", "data": {"drone": match.group(1)}}
 
-        # ARIA LIVE DATA FIX: natural queue/status phrases.
-        # Examples: "what's gws queue looking like", "show sapphire queue",
-        # "how many tracks does lockhart have", "what is harmonic playing".
-        natural_queue_match = re.search(
-            rf"\b({DRONE_PATTERN})\b.*\b(queue|queued|lineup|tracks?|songs?|playlist|next\s+up|playing|current|status|looking\s+like)\b",
-            lowered,
-        ) or re.search(
-            rf"\b(queue|queued|lineup|tracks?|songs?|playlist|next\s+up|playing|current|status|looking\s+like)\b.*\b({DRONE_PATTERN})\b",
-            lowered,
-        )
-        if natural_queue_match and re.search(r"\b(what|whats|what's|show|view|check|inspect|list|how|many|look|looking|status|playing|current|next)\b", lowered):
-            groups = [part for part in natural_queue_match.groups() if part in DRONE_NAMES]
-            return {"action": "swarm_queue", "data": {"drone": groups[0] if groups else None}}
-
-        if re.search(r"\b(queue|queues|queued tracks?|lineup|what'?s playing|currently playing|swarm status|bot status)\b", lowered) and re.search(r"\b(swarm|bots?|nodes?|music)\b", lowered):
-            return {"action": "swarm_radar"}
-
         match = re.fullmatch(rf"shuffle(?:\s+({DRONE_PATTERN}|all|swarm))?", lowered)
         if match:
             drone = match.group(1)

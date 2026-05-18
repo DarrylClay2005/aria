@@ -75,8 +75,6 @@ class AutonomousEngine:
         self._bot_schema_locks: dict[str, asyncio.Lock] = {}
         self._bot_schema_retry_after: dict[str, float] = {}
         self._bot_schema_recheck_seconds = max(30.0, float(os.getenv("ARIA_BOT_SCHEMA_RECHECK_SECONDS", "300") or "300"))
-        self._bot_schema_autofix_enabled = str(os.getenv("ARIA_AUTONOMY_BOT_SCHEMA_AUTOFIX", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-        self._bot_schema_autofix_notice: set[str] = set()
 
         self._max_repair_attempts = 3
         self._repair_followup_delay = 6.0
@@ -1134,17 +1132,6 @@ class AutonomousEngine:
 
     async def ensure_bot_schema(self, cur, drone: str) -> None:
         if drone in self._bot_schema_ready:
-            return
-        # Aria should observe and repair the swarm, not run heavyweight DDL on every medic scan.
-        # The music bots/SwarmPanel own these schemas; leave emergency migration opt-in only.
-        if not self._bot_schema_autofix_enabled:
-            self._bot_schema_ready.add(drone)
-            if drone not in self._bot_schema_autofix_notice:
-                logger.info(
-                    "Skipping heavy bot schema DDL for %s; set ARIA_AUTONOMY_BOT_SCHEMA_AUTOFIX=1 to let Aria migrate bot schemas.",
-                    drone,
-                )
-                self._bot_schema_autofix_notice.add(drone)
             return
         now = time.monotonic()
         if self._bot_schema_retry_after.get(drone, 0.0) > now:

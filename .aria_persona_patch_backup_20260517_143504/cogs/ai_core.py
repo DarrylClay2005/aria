@@ -5,7 +5,7 @@ import aiomysql
 import logging
 import re
 import io
-from aria.aria_core import AriaCore, DISCORD_CHAT_SYSTEM_INSTRUCTION
+from aria.aria_core import AriaCore, DEFAULT_CHAT_SYSTEM_INSTRUCTION
 from core.ai_service import AIServiceUnavailable
 from core.chat_attachments import (
     MAX_CHAT_ATTACHMENTS,
@@ -164,8 +164,6 @@ class AICore(commands.Cog):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         guild = getattr(ctx, "guild", None)
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
-        channel = getattr(ctx, "channel", None)
-        channel_id = getattr(channel, "id", None) or getattr(ctx, "channel_id", None)
         user_name = getattr(actor, "display_name", None) if actor else None
         user_id = getattr(actor, "id", None) if actor else None
         return await self.aria_core.chat(
@@ -173,7 +171,6 @@ class AICore(commands.Cog):
             system_instruction=system_instruction,
             user_id=user_id,
             guild_id=guild_id,
-            channel_id=channel_id,
             user_name=user_name,
             source_kind=source_kind,
             response_style=source_kind,
@@ -216,7 +213,7 @@ class AICore(commands.Cog):
             direct_attachment = direct_attachment or {}
             response_text = await self.generate_aria_reply(
                 contextual_prompt,
-                DISCORD_CHAT_SYSTEM_INSTRUCTION,
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=message,
                 source_kind="mention_chat",
                 attachment_bytes=direct_attachment.get("attachment_bytes"),
@@ -258,7 +255,7 @@ class AICore(commands.Cog):
             response_text = await self.generate_aria_reply(
                 f"The user says: '{prompt}'. Respond to them, mock their taste if necessary, and then pick a superior track. "
                 "YOU MUST INCLUDE exactly one play tag formatted like [PLAY: Song Name - Artist] at the end of your response.",
-                DISCORD_CHAT_SYSTEM_INSTRUCTION
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION
                 + " When taking the aux, stay focused on music selection and include exactly one [PLAY: Song Name - Artist] tag.",
                 ctx=interaction,
                 source_kind="aux_chat",
@@ -381,7 +378,7 @@ class AICore(commands.Cog):
 
             reply = await self.generate_aria_reply(
                 contextual_prompt,
-                DISCORD_CHAT_SYSTEM_INSTRUCTION,
+                DEFAULT_CHAT_SYSTEM_INSTRUCTION,
                 ctx=interaction,
                 source_kind="slash_chat",
                 attachment_bytes=direct_attachment.get("attachment_bytes"),

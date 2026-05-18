@@ -1,8 +1,6 @@
-import os
 import re
-from collections import defaultdict, deque
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime
 
 from core.intent_parser import IntentParser
 from core.commands import router
@@ -29,8 +27,7 @@ DISCORD_CHAT_SYSTEM_INSTRUCTION = (
     DEFAULT_CHAT_SYSTEM_INSTRUCTION
     + "\nYou are replying inside Discord, not Telegram. Use Aria's full Discord personality: sharp, playful, technical, and confident. "
     "Do not use Telegram bridge phrasing, compact bot-menu wording, or generic assistant filler. "
-    "When the operator asks about their swarm, code, logs, Linux, Docker, MariaDB, Lavalink, or panels, speak like their battle-tested ops gremlin: clear root cause, pointed fixes, and a little bite. "
-    "For Discord follow-ups, treat the recent conversation block as hard continuity. If the user asks about 'owner', 'repo', 'that', 'it', 'the folder', 'the fix', or a similarly short reference, resolve it from the recent thread before asking 'of what?'."
+    "When the operator asks about their swarm, code, logs, Linux, Docker, MariaDB, Lavalink, or panels, speak like their battle-tested ops gremlin: clear root cause, pointed fixes, and a little bite."
 )
 
 TELEGRAM_CHAT_SYSTEM_INSTRUCTION = (
@@ -90,11 +87,6 @@ class AriaCore:
         self.ai = ai_service or AIService()
         self.learning = learning_engine or LearningEngine()
         self.pending_clarifications: dict[tuple[int | None, int | None], dict] = {}
-        volatile_limit = max(2, min(20, int(os.getenv("ARIA_VOLATILE_CONTEXT_TURNS", "8") or "8")))
-        self._volatile_context_limit = volatile_limit
-        self._volatile_recent_context: dict[tuple[int | None, int | None, int | None], deque[dict]] = defaultdict(
-            lambda: deque(maxlen=self._volatile_context_limit)
-        )
 
     async def initialize(self):
         await self.learning.initialize()
@@ -106,146 +98,6 @@ class AriaCore:
         guild = getattr(ctx, "guild", None)
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
         return user_id, guild_id
-
-    # ARIA LIVE DATA FIX: detect when chat needs real swarm data.
-    @staticmethod
-    def _prompt_requests_live_swarm(prompt: str) -> bool:
-        lowered = str(prompt or "").lower()
-        if not lowered:
-            return False
-        swarm_words = (
-            "queue", "queued", "lineup", "playing", "current track", "currently", "status",
-            "swarm", "music bot", "music bots", "node", "nodes", "backup", "lavalink",
-            "gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony",
-            "tunestream", "alucard", "sapphire", "strife", "lockhart",
-        )
-        return any(word in lowered for word in swarm_words)
-
-    @staticmethod
-    def _channel_id_from_ctx(ctx) -> int | None:
-        channel = getattr(ctx, "channel", None)
-        channel_id = getattr(channel, "id", None) or getattr(ctx, "channel_id", None)
-        try:
-            return int(channel_id) if channel_id else None
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _context_scope_key(
-        *,
-        user_id: int | None,
-        guild_id: int | None,
-        channel_id: int | None,
-    ) -> tuple[int | None, int | None, int | None]:
-        return (int(user_id) if user_id else None, int(guild_id) if guild_id else None, int(channel_id) if channel_id else None)
-
-    def _remember_volatile_context(
-        self,
-        *,
-        user_id: int | None,
-        guild_id: int | None,
-        channel_id: int | None = None,
-        source_kind: str,
-        prompt: str,
-        reply: str | None = None,
-    ) -> None:
-        if user_id is None and guild_id is None:
-            return
-        prompt_text = str(prompt or "").strip()
-        if not prompt_text:
-            return
-        entry = {
-            "source_kind": source_kind or "chat",
-            "prompt_text": prompt_text[:3000],
-            "reply_text": (str(reply or "").strip()[:3000] or None),
-            "created_at": datetime.now(timezone.utc),
-            "channel_id": channel_id,
-        }
-        exact_key = self._context_scope_key(user_id=user_id, guild_id=guild_id, channel_id=channel_id)
-        self._volatile_recent_context[exact_key].append(entry)
-        if channel_id is not None:
-            broad_key = self._context_scope_key(user_id=user_id, guild_id=guild_id, channel_id=None)
-            self._volatile_recent_context[broad_key].append(entry)
-
-    def _volatile_context(
-        self,
-        *,
-        user_id: int | None,
-        guild_id: int | None,
-        channel_id: int | None = None,
-        limit: int = 6,
-    ) -> list[dict]:
-        keys = [
-            self._context_scope_key(user_id=user_id, guild_id=guild_id, channel_id=channel_id),
-            self._context_scope_key(user_id=user_id, guild_id=guild_id, channel_id=None),
-            self._context_scope_key(user_id=user_id, guild_id=None, channel_id=None),
-        ]
-        seen_keys = set()
-        entries: list[dict] = []
-        for key in keys:
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            entries.extend(list(self._volatile_recent_context.get(key, ())))
-
-        deduped: list[dict] = []
-        seen_prompts: set[tuple[str, str]] = set()
-        for entry in entries:
-            marker = (str(entry.get("prompt_text") or "")[:240], str(entry.get("reply_text") or "")[:240])
-            if marker in seen_prompts:
-                continue
-            seen_prompts.add(marker)
-            deduped.append(entry)
-        return deduped[-max(1, int(limit)):]
-
-    @staticmethod
-    def _format_dialogue_context(entries: list[dict], *, limit: int = 6) -> str:
-        if not entries:
-            return ""
-        lines = [
-            "Recent conversation context for continuity. Use this to resolve short follow-ups and pronouns; do not ask what the user means when the thread already answers it."
-        ]
-        for index, entry in enumerate(entries[-max(1, int(limit)):], start=1):
-            source = str(entry.get("source_kind") or "chat").replace("_", " ")
-            user_text = str(entry.get("prompt_text") or "").strip().replace("\n", " ")[:420]
-            reply_text = str(entry.get("reply_text") or "").strip().replace("\n", " ")[:420]
-            if reply_text:
-                lines.append(f"{index}. [{source}] User: {user_text} | Aria: {reply_text}")
-            else:
-                lines.append(f"{index}. [{source}] User: {user_text}")
-        return "\n".join(lines)
-
-    async def _dialogue_context_for_prompt(
-        self,
-        *,
-        user_id: int | None,
-        guild_id: int | None,
-        channel_id: int | None = None,
-        limit: int = 6,
-    ) -> list[dict]:
-        entries: list[dict] = []
-        try:
-            entries.extend(
-                await self.learning.recent_context(
-                    user_id=user_id,
-                    guild_id=guild_id,
-                    channel_id=channel_id,
-                    limit=limit,
-                )
-            )
-        except Exception:
-            pass
-        entries.extend(self._volatile_context(user_id=user_id, guild_id=guild_id, channel_id=channel_id, limit=limit))
-
-        deduped: list[dict] = []
-        seen: set[tuple[str, str]] = set()
-        for entry in entries:
-            marker = (str(entry.get("prompt_text") or "")[:240], str(entry.get("reply_text") or "")[:240])
-            if not marker[0] or marker in seen:
-                continue
-            seen.add(marker)
-            deduped.append(entry)
-        return deduped[-max(1, int(limit)):]
 
     @staticmethod
     def _split_query_options(query: str) -> list[str]:
@@ -377,19 +229,9 @@ class AriaCore:
             guild_id=guild_id,
             raw_phrase=str(raw_phrase),
         )
-        channel_id = self._channel_id_from_ctx(ctx)
-        self._remember_volatile_context(
-            user_id=learning_uid,
-            guild_id=guild_id,
-            channel_id=channel_id,
-            source_kind="clarification_resolution",
-            prompt=msg,
-            reply=rendered,
-        )
         await self.learning.record_recent_context(
             user_id=learning_uid,
             guild_id=guild_id,
-            channel_id=channel_id,
             source_kind="clarification_resolution",
             prompt=msg,
             reply=rendered,
@@ -428,19 +270,9 @@ class AriaCore:
                 action=str(clarification.get("action") or ""),
                 options=list(clarification.get("options") or []),
             )
-            channel_id = self._channel_id_from_ctx(ctx)
-            self._remember_volatile_context(
-                user_id=learning_uid,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                source_kind="clarification_prompt",
-                prompt=raw_phrase,
-                reply=reply,
-            )
             await self.learning.record_recent_context(
                 user_id=learning_uid,
                 guild_id=guild_id,
-                channel_id=channel_id,
                 source_kind="clarification_prompt",
                 prompt=raw_phrase,
                 reply=reply,
@@ -455,19 +287,9 @@ class AriaCore:
             raw_phrase=raw_phrase,
         )
         if raw_phrase and (rendered or intents):
-            channel_id = self._channel_id_from_ctx(ctx)
-            self._remember_volatile_context(
-                user_id=learning_uid,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                source_kind="swarm_command",
-                prompt=raw_phrase,
-                reply=rendered,
-            )
             await self.learning.record_recent_context(
                 user_id=learning_uid,
                 guild_id=guild_id,
-                channel_id=channel_id,
                 source_kind="swarm_command",
                 prompt=raw_phrase,
                 reply=rendered,
@@ -506,7 +328,6 @@ class AriaCore:
         system_instruction: str | None = None,
         user_id: int | None = None,
         guild_id: int | None = None,
-        channel_id: int | None = None,
         user_name: str | None = None,
         source_kind: str = "chat",
         response_style: str | None = None,
@@ -534,7 +355,6 @@ class AriaCore:
                 command_phrase=prompt_for_memory,
                 user_id=user_id,
                 guild_id=guild_id,
-                channel_id=channel_id,
                 response_style=response_style or source_kind,
             )
         except Exception:
@@ -553,43 +373,18 @@ class AriaCore:
             # Guard against accidental reuse of the Telegram bridge prompt in Discord.
             base_instruction = DISCORD_CHAT_SYSTEM_INSTRUCTION
 
-        dialogue_context = await self._dialogue_context_for_prompt(
-            user_id=user_id,
-            guild_id=guild_id,
-            channel_id=channel_id,
-            limit=max(2, min(12, int(os.getenv("ARIA_DIALOGUE_CONTEXT_TURNS", "6") or "6"))),
-        )
-        dialogue_context_block = self._format_dialogue_context(dialogue_context)
-
-        swarm_context_block = ""
-        if guild_id and self._prompt_requests_live_swarm(prompt_for_memory):
-            try:
-                from core.swarm_control import swarm_controller
-                swarm_context_block = await swarm_controller.live_swarm_context(int(guild_id), prompt=prompt_for_memory)
-            except Exception:
-                swarm_context_block = ""
-
         composite_instruction = "\n".join(
             part
             for part in (
                 base_instruction,
                 prompt_fragment,
-                "Continuity rule: answer the current message as part of the same thread. Do not reset the conversation after two replies; resolve short follow-ups from recent context before asking for clarification."
-                if dialogue_context_block else "",
-                "Live swarm data rule: when a live swarm data block is present, treat it as authoritative MariaDB data. Do not claim a queue is empty if the live data says otherwise, and do not invent bot state missing from the block."
-                if swarm_context_block else "",
-                swarm_context_block,
                 f"Fresh insult seed to remix rather than quote verbatim: {insult_seed}" if insult_seed else "",
             )
             if part
         )
-        prompt_for_model = prompt
-        if dialogue_context_block:
-            prompt_for_model = f"{dialogue_context_block}\n\nCurrent user message:\n{prompt}"
-
         if attachment_bytes and attachment_mime_type:
             response = await self.ai.generate_with_attachment(
-                prompt_for_model,
+                prompt,
                 attachment_bytes=attachment_bytes,
                 attachment_mime_type=attachment_mime_type,
                 attachment_name=attachment_name or "attachment",
@@ -597,24 +392,15 @@ class AriaCore:
             )
         else:
             response = await self.ai.generate(
-                prompt_for_model,
+                prompt,
                 system_instruction=composite_instruction,
             )
         # Post-response recording is best-effort; never let it mask the reply.
         try:
             await self.observe_text(user_id=None, guild_id=guild_id, text=response, source_kind="reply")
-            self._remember_volatile_context(
-                user_id=user_id,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                source_kind=source_kind,
-                prompt=prompt_for_memory,
-                reply=response,
-            )
             await self.learning.record_recent_context(
                 user_id=user_id,
                 guild_id=guild_id,
-                channel_id=channel_id,
                 source_kind=source_kind,
                 prompt=prompt_for_memory,
                 reply=response,

@@ -363,7 +363,6 @@ class AITools(commands.Cog):
             system_instruction=system_instruction,
             user_id=interaction.user.id,
             guild_id=interaction.guild_id,
-            channel_id=interaction.channel_id,
             user_name=interaction.user.display_name,
             source_kind=source_kind,
             response_style=source_kind,

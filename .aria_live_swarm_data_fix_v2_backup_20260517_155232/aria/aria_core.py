@@ -107,20 +107,6 @@ class AriaCore:
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
         return user_id, guild_id
 
-    # ARIA LIVE DATA FIX: detect when chat needs real swarm data.
-    @staticmethod
-    def _prompt_requests_live_swarm(prompt: str) -> bool:
-        lowered = str(prompt or "").lower()
-        if not lowered:
-            return False
-        swarm_words = (
-            "queue", "queued", "lineup", "playing", "current track", "currently", "status",
-            "swarm", "music bot", "music bots", "node", "nodes", "backup", "lavalink",
-            "gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony",
-            "tunestream", "alucard", "sapphire", "strife", "lockhart",
-        )
-        return any(word in lowered for word in swarm_words)
-
     @staticmethod
     def _channel_id_from_ctx(ctx) -> int | None:
         channel = getattr(ctx, "channel", None)
@@ -561,14 +547,6 @@ class AriaCore:
         )
         dialogue_context_block = self._format_dialogue_context(dialogue_context)
 
-        swarm_context_block = ""
-        if guild_id and self._prompt_requests_live_swarm(prompt_for_memory):
-            try:
-                from core.swarm_control import swarm_controller
-                swarm_context_block = await swarm_controller.live_swarm_context(int(guild_id), prompt=prompt_for_memory)
-            except Exception:
-                swarm_context_block = ""
-
         composite_instruction = "\n".join(
             part
             for part in (
@@ -576,9 +554,6 @@ class AriaCore:
                 prompt_fragment,
                 "Continuity rule: answer the current message as part of the same thread. Do not reset the conversation after two replies; resolve short follow-ups from recent context before asking for clarification."
                 if dialogue_context_block else "",
-                "Live swarm data rule: when a live swarm data block is present, treat it as authoritative MariaDB data. Do not claim a queue is empty if the live data says otherwise, and do not invent bot state missing from the block."
-                if swarm_context_block else "",
-                swarm_context_block,
                 f"Fresh insult seed to remix rather than quote verbatim: {insult_seed}" if insult_seed else "",
             )
             if part

@@ -1214,7 +1214,8 @@ class SwarmController:
                         f"{guild.name if guild else guild_id} | {bot_name}: {status}, current `{current[:120]}`, next `{next_title[:120]}`, live queue {int(snapshot.get('live_count') or 0)}, backup {int(snapshot.get('backup_count') or 0)}."
                     )
 
-        return "\n".join(lines) if lines else "Grid is quiet. No active swarm nodes, queue rows, or backup rows reported for this server."
+        return "
+".join(lines) if lines else "Grid is quiet. No active swarm nodes, queue rows, or backup rows reported for this server."
 
     async def wrapped(self, ctx) -> str:
         if not db.pool:

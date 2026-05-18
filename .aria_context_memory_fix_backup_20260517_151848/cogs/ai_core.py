@@ -164,8 +164,6 @@ class AICore(commands.Cog):
         actor = getattr(ctx, "author", None) or getattr(ctx, "user", None)
         guild = getattr(ctx, "guild", None)
         guild_id = guild.id if guild else getattr(ctx, "guild_id", None)
-        channel = getattr(ctx, "channel", None)
-        channel_id = getattr(channel, "id", None) or getattr(ctx, "channel_id", None)
         user_name = getattr(actor, "display_name", None) if actor else None
         user_id = getattr(actor, "id", None) if actor else None
         return await self.aria_core.chat(
@@ -173,7 +171,6 @@ class AICore(commands.Cog):
             system_instruction=system_instruction,
             user_id=user_id,
             guild_id=guild_id,
-            channel_id=channel_id,
             user_name=user_name,
             source_kind=source_kind,
             response_style=source_kind,

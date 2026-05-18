@@ -361,190 +361,6 @@ class SwarmController:
     def _dict_cursor():
         return aiomysql.DictCursor if aiomysql else None
 
-    # ARIA LIVE DATA FIX: queue/status snapshots that read the actual bot tables
-    # without silently going blind when legacy rows have NULL bot_name or when a
-    # table lacks a newer column. These helpers are intentionally read-only.
-    async def _count_table_rows_for_bot(self, cur, bot_name: str, table_suffix: str, guild_id: int) -> int:
-        schema = schema_for_drone(bot_name)
-        table = f"{bot_name}_{table_suffix}"
-        try:
-            await cur.execute(
-                f"SELECT COUNT(*) AS c FROM {schema}.{table} "
-                "WHERE guild_id = %s AND (bot_name = %s OR bot_name IS NULL OR bot_name = '')",
-                (guild_id, bot_name),
-            )
-            row = await cur.fetchone() or {}
-            return int(row.get("c") or 0)
-        except Exception:
-            try:
-                await cur.execute(f"SELECT COUNT(*) AS c FROM {schema}.{table} WHERE guild_id = %s", (guild_id,))
-                row = await cur.fetchone() or {}
-                return int(row.get("c") or 0)
-            except Exception:
-                return 0
-
-    async def _fetch_table_rows_for_bot(self, cur, bot_name: str, table_suffix: str, guild_id: int, *, limit: int = 10) -> list[dict[str, Any]]:
-        schema = schema_for_drone(bot_name)
-        table = f"{bot_name}_{table_suffix}"
-        limit = max(1, min(25, int(limit or 10)))
-        select_cols = "id, guild_id, bot_name, video_url, title, requester_id"
-        try:
-            await cur.execute(
-                f"SELECT {select_cols} FROM {schema}.{table} "
-                "WHERE guild_id = %s AND (bot_name = %s OR bot_name IS NULL OR bot_name = '') "
-                f"ORDER BY id ASC LIMIT {limit}",
-                (guild_id, bot_name),
-            )
-            return list(await cur.fetchall() or [])
-        except Exception:
-            try:
-                await cur.execute(
-                    f"SELECT id, guild_id, video_url, title, requester_id FROM {schema}.{table} "
-                    f"WHERE guild_id = %s ORDER BY id ASC LIMIT {limit}",
-                    (guild_id,),
-                )
-                rows = list(await cur.fetchall() or [])
-                for row in rows:
-                    row.setdefault("bot_name", bot_name)
-                return rows
-            except Exception:
-                return []
-
-    async def _fetch_playback_for_bot(self, cur, bot_name: str, guild_id: int) -> dict[str, Any] | None:
-        schema = schema_for_drone(bot_name)
-        table = f"{bot_name}_playback_state"
-        try:
-            await cur.execute(
-                f"SELECT guild_id, bot_name, channel_id, video_url, title, position_seconds, is_playing, is_paused "
-                f"FROM {schema}.{table} "
-                "WHERE guild_id = %s AND (bot_name = %s OR bot_name IS NULL OR bot_name = '') "
-                "ORDER BY is_playing DESC, is_paused DESC LIMIT 1",
-                (guild_id, bot_name),
-            )
-            row = await cur.fetchone()
-            if row:
-                return dict(row)
-        except Exception:
-            try:
-                await cur.execute(
-                    f"SELECT guild_id, channel_id, video_url, title, position_seconds, is_playing, is_paused "
-                    f"FROM {schema}.{table} WHERE guild_id = %s ORDER BY is_playing DESC, is_paused DESC LIMIT 1",
-                    (guild_id,),
-                )
-                row = await cur.fetchone()
-                if row:
-                    item = dict(row)
-                    item.setdefault("bot_name", bot_name)
-                    return item
-            except Exception:
-                return None
-        return None
-
-    async def _queue_snapshot(self, cur, bot_name: str, guild_id: int, *, limit: int = 10) -> dict[str, Any]:
-        live_count = await self._count_table_rows_for_bot(cur, bot_name, "queue", guild_id)
-        backup_count = await self._count_table_rows_for_bot(cur, bot_name, "queue_backup", guild_id)
-        live_rows = await self._fetch_table_rows_for_bot(cur, bot_name, "queue", guild_id, limit=limit)
-        backup_rows = await self._fetch_table_rows_for_bot(cur, bot_name, "queue_backup", guild_id, limit=min(5, limit))
-        playback = await self._fetch_playback_for_bot(cur, bot_name, guild_id)
-        return {
-            "bot": bot_name,
-            "guild_id": int(guild_id),
-            "live_count": int(live_count or 0),
-            "backup_count": int(backup_count or 0),
-            "live_rows": live_rows,
-            "backup_rows": backup_rows,
-            "playback": playback or {},
-        }
-
-    @staticmethod
-    def _snapshot_has_data(snapshot: dict[str, Any]) -> bool:
-        playback = snapshot.get("playback") or {}
-        return bool(
-            snapshot.get("live_count")
-            or snapshot.get("backup_count")
-            or playback.get("title")
-            or playback.get("video_url")
-            or playback.get("is_playing")
-            or playback.get("is_paused")
-        )
-
-    @staticmethod
-    def _playback_status(playback: dict[str, Any]) -> str:
-        if playback.get("is_playing"):
-            return "playing"
-        if playback.get("is_paused"):
-            return "paused"
-        if playback.get("title") or playback.get("video_url"):
-            return "idle/stale state"
-        return "idle"
-
-    def _format_queue_snapshot(self, bot_name: str, snapshot: dict[str, Any], *, backup_preview: bool = True) -> str:
-        playback = snapshot.get("playback") or {}
-        status = self._playback_status(playback)
-        current_title = str(playback.get("title") or playback.get("video_url") or "").strip()
-        live_rows = list(snapshot.get("live_rows") or [])
-        backup_rows = list(snapshot.get("backup_rows") or [])
-        live_count = int(snapshot.get("live_count") or 0)
-        backup_count = int(snapshot.get("backup_count") or 0)
-
-        lines = [f"`{bot_name}` queue snapshot:"]
-        if current_title:
-            lines.append(f"Current: `{current_title[:160]}` ({status}).")
-        elif status != "idle":
-            lines.append(f"Current: unknown title ({status}).")
-        lines.append(f"Live queue: {live_count} track{'s' if live_count != 1 else ''}; backup: {backup_count} track{'s' if backup_count != 1 else ''}.")
-
-        if live_rows:
-            lines.append("Next up:")
-            for index, row in enumerate(live_rows[:10], start=1):
-                title = str(row.get("title") or row.get("video_url") or "untitled track").strip()
-                lines.append(f"{index}. {title[:180]}")
-        else:
-            lines.append("Live queue preview: empty.")
-
-        if backup_preview and backup_rows and (not live_rows or backup_count > live_count):
-            lines.append("Backup preview:")
-            for index, row in enumerate(backup_rows[:5], start=1):
-                title = str(row.get("title") or row.get("video_url") or "untitled backup track").strip()
-                lines.append(f"B{index}. {title[:180]}")
-
-        if not self._snapshot_has_data(snapshot):
-            return f"`{bot_name}` has no live queue, no backup queue, and no active playback row for this server. If you know it is playing, I am probably pointed at the wrong guild/schema — wonderfully annoying, but fixable."
-        return "\n".join(lines)[:1900]
-
-    async def live_swarm_context(self, guild_id: int | None, *, prompt: str = "", limit: int = 5) -> str:
-        """Return a compact, authoritative MariaDB-backed swarm summary for AI chat prompts."""
-        if not guild_id or not db.pool:
-            return ""
-        lowered = str(prompt or "").lower()
-        mentioned = [drone for drone in DRONE_NAMES if re.search(rf"\b{re.escape(drone)}\b", lowered)]
-        targets = mentioned or list(DRONE_NAMES)
-        lines = ["Live swarm data from MariaDB. Treat this as authoritative; do not invent queue state:"]
-        added = 0
-        async with db.pool.acquire() as conn:
-            async with conn.cursor(self._dict_cursor()) as cur:
-                for bot_name in targets:
-                    snapshot = await self._queue_snapshot(cur, bot_name, int(guild_id), limit=max(1, min(5, int(limit or 5))))
-                    if not mentioned and not self._snapshot_has_data(snapshot):
-                        continue
-                    playback = snapshot.get("playback") or {}
-                    status = self._playback_status(playback)
-                    current = str(playback.get("title") or playback.get("video_url") or "none").strip()[:120]
-                    next_row = (snapshot.get("live_rows") or [None])[0] or {}
-                    next_title = str(next_row.get("title") or next_row.get("video_url") or "none").strip()[:120]
-                    lines.append(
-                        f"- {bot_name}: status={status}; current={current}; live_queue={int(snapshot.get('live_count') or 0)}; backup_queue={int(snapshot.get('backup_count') or 0)}; next={next_title}"
-                    )
-                    added += 1
-                    if not mentioned and added >= 8:
-                        break
-        if added == 0:
-            if mentioned:
-                lines.append("- Requested node has no visible playback/queue rows for this guild.")
-            else:
-                return ""
-        return "\n".join(lines)[:1800]
-
     async def _guild_targets(self, guild_id: int, *, preferred: str | None = None, active_only: bool = False) -> list[str]:
         if preferred:
             return [preferred]
@@ -557,7 +373,7 @@ class SwarmController:
 
     async def active_drones(self, guild_id: int) -> list[str]:
         active = []
-        if not db.pool or not guild_id:
+        if not db.pool:
             return active
         guild_key = int(guild_id or 0)
         now = time.monotonic()
@@ -569,29 +385,17 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 for drone in DRONE_NAMES:
                     try:
+                        # FIX: only consider a drone "active" if it is actually playing,
+                        # not merely paused or stopped with a stale playback_state row.
                         await cur.execute(
-                            f"""
-                            SELECT
-                                EXISTS(
-                                    SELECT 1 FROM {schema_for_drone(drone)}.{drone}_playback_state
-                                    WHERE guild_id = %s
-                                      AND (bot_name = %s OR bot_name IS NULL OR bot_name = '')
-                                      AND (is_playing = TRUE OR is_paused = TRUE OR title IS NOT NULL OR video_url IS NOT NULL)
-                                    LIMIT 1
-                                ) AS has_playback,
-                                EXISTS(
-                                    SELECT 1 FROM {schema_for_drone(drone)}.{drone}_queue
-                                    WHERE guild_id = %s
-                                      AND (bot_name = %s OR bot_name IS NULL OR bot_name = '')
-                                    LIMIT 1
-                                ) AS has_queue
-                            """,
-                            (guild_id, drone, guild_id, drone),
+                            f"SELECT guild_id FROM {schema_for_drone(drone)}.{drone}_playback_state"
+                            f" WHERE guild_id = %s AND is_playing = TRUE LIMIT 1",
+                            (guild_id,),
                         )
-                        row = await cur.fetchone() or {}
+                        row = await cur.fetchone()
                     except Exception:
-                        row = {}
-                    if row.get("has_playback") or row.get("has_queue"):
+                        row = None
+                    if row:
                         active.append(drone)
         _active_drones_cache[guild_key] = (time.monotonic() + ACTIVE_DRONE_CACHE_TTL_SECONDS, list(active))
         return active
@@ -872,22 +676,29 @@ class SwarmController:
 
     async def queue_view(self, ctx, *, drone: str | None = None) -> str:
         guild_id = guild_id_from_ctx(ctx)
-        if not guild_id:
-            return "I need a Discord server context before I can inspect swarm queues. For Telegram, set `ARIA_TELEGRAM_DEFAULT_GUILD_ID` to the server id, then restart me."
-
         bot_name = normalize_drone_name(drone)
         if bot_name is None:
             active = await self.active_drones(guild_id)
             bot_name = active[0] if active else "gws"
 
+        # FIX: guard against uninitialized pool
         if not db.pool:
             return "My swarm database link is offline right now."
 
         async with db.pool.acquire() as conn:
             async with conn.cursor(self._dict_cursor()) as cur:
-                snapshot = await self._queue_snapshot(cur, bot_name, int(guild_id), limit=10)
+                try:
+                    await cur.execute(
+                        f"SELECT title FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC LIMIT 10",
+                        (guild_id, bot_name),
+                    )
+                    rows = await cur.fetchall()
+                except Exception:
+                    rows = []
 
-        return self._format_queue_snapshot(bot_name, snapshot)
+        if not rows:
+            return f"`{bot_name}` has nothing queued right now."
+        return "\n".join([f"{index}. {row['title']}" for index, row in enumerate(rows, 1)])
 
     async def _music_intelligence_snapshot(self, guild_id: int, *, drone: str | None = None) -> dict[str, Any]:
         cache_key = (int(guild_id or 0), normalize_drone_name(drone))
@@ -1191,8 +1002,6 @@ class SwarmController:
         if not db.pool:
             return "Database pool is not ready yet; swarm radar is temporarily offline."
         guild_id = guild_id_from_ctx(ctx)
-        if not guild_id:
-            return "I need a Discord server context before I can run swarm radar. For Telegram, set `ARIA_TELEGRAM_DEFAULT_GUILD_ID` to the server id, then restart me."
         guild = guild_from_ctx(ctx)
         lines = []
 
@@ -1200,21 +1009,30 @@ class SwarmController:
             async with conn.cursor(self._dict_cursor()) as cur:
                 for bot_name in DRONE_NAMES:
                     try:
-                        snapshot = await self._queue_snapshot(cur, bot_name, int(guild_id), limit=1)
+                        await cur.execute(
+                            f"""
+                            SELECT
+                                p.guild_id,
+                                p.is_playing,
+                                (SELECT title FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s ORDER BY id ASC LIMIT 1) AS next_title,
+                                (SELECT COUNT(*) FROM {schema_for_drone(bot_name)}.{bot_name}_queue WHERE guild_id = %s) AS q_len
+                            FROM {schema_for_drone(bot_name)}.{bot_name}_playback_state p
+                            WHERE p.guild_id = %s
+                            LIMIT 1
+                            """,
+                            (guild_id, guild_id, guild_id),
+                        )
+                        state = await cur.fetchone()
                     except Exception:
+                        state = None
+                    if not state:
                         continue
-                    if not self._snapshot_has_data(snapshot):
-                        continue
-                    playback = snapshot.get("playback") or {}
-                    status = self._playback_status(playback)
-                    current = str(playback.get("title") or playback.get("video_url") or "nothing active").strip()
-                    next_row = (snapshot.get("live_rows") or [None])[0] or {}
-                    next_title = str(next_row.get("title") or next_row.get("video_url") or "nothing queued").strip()
-                    lines.append(
-                        f"{guild.name if guild else guild_id} | {bot_name}: {status}, current `{current[:120]}`, next `{next_title[:120]}`, live queue {int(snapshot.get('live_count') or 0)}, backup {int(snapshot.get('backup_count') or 0)}."
-                    )
 
-        return "\n".join(lines) if lines else "Grid is quiet. No active swarm nodes, queue rows, or backup rows reported for this server."
+                    status = "playing" if state.get("is_playing") else "paused"
+                    track = state.get("next_title") or "nothing queued"
+                    lines.append(f"{guild.name if guild else guild_id} | {bot_name}: {status}, next up `{track}`, queue {state.get('q_len') or 0}.")
+
+        return "\n".join(lines) if lines else "Grid is quiet. No active swarm nodes reported for this server."
 
     async def wrapped(self, ctx) -> str:
         if not db.pool:

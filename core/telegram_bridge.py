@@ -96,8 +96,27 @@ class TelegramBridge:
 
     async def _poll_loop(self) -> None:
         self.status.running = True
+        _commands_registered = bool(self.status.bot_username)  # True only if start() succeeded fully
         while not self._closing.is_set():
             try:
+                # If startup() failed before setMyCommands ran (network blip, bad token timing),
+                # retry command registration on the first successful poll cycle.
+                if not _commands_registered:
+                    try:
+                        info = await self._api("getMe", timeout=12)
+                        user = info.get("result") or {}
+                        self.status.bot_username = str(user.get("username") or "")
+                        if self.commands:
+                            await self._api(
+                                "setMyCommands",
+                                {"commands": json.dumps([{"command": key, "description": desc} for key, desc in self.commands])},
+                                timeout=12,
+                            )
+                        _commands_registered = True
+                        logger.info("Telegram bridge for %s re-registered commands after startup delay.", self.name)
+                    except Exception as reg_exc:
+                        logger.warning("Telegram bridge for %s command re-registration failed, will retry: %s", self.name, reg_exc)
+
                 params: dict[str, Any] = {
                     "timeout": self.poll_timeout_seconds,
                     "allowed_updates": json.dumps(["message"]),

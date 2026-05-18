@@ -88,23 +88,6 @@ def compact_excerpt(text: str, *, limit: int = 180) -> str:
     return cleaned[:limit]
 
 
-TELEGRAM_RESPONSE_STYLES = {"telegram", "telegram_chat", "telegram_command", "telegram_status"}
-DISCORD_RESPONSE_STYLES = {"discord", "prefix_chat", "mention_chat", "slash_chat", "aux_chat"}
-
-
-def normalize_response_style(style: str | None) -> str:
-    return str(style or "").strip().lower()
-
-
-def compatible_response_styles(style: str | None) -> set[str] | None:
-    normalized = normalize_response_style(style)
-    if normalized in TELEGRAM_RESPONSE_STYLES:
-        return set(TELEGRAM_RESPONSE_STYLES)
-    if normalized in DISCORD_RESPONSE_STYLES or normalized.startswith("discord_"):
-        return set(DISCORD_RESPONSE_STYLES)
-    return None
-
-
 class LearningEngine:
     async def initialize(self) -> None:
         if not db.pool:
@@ -178,18 +161,15 @@ class LearningEngine:
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         user_id BIGINT NULL,
                         guild_id BIGINT NULL,
-                        channel_id BIGINT NULL,
                         source_kind VARCHAR(32) NOT NULL DEFAULT 'chat',
                         prompt_text TEXT NOT NULL,
                         reply_text TEXT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_recent_context_user_guild (user_id, guild_id, id),
-                        INDEX idx_recent_context_channel (user_id, guild_id, channel_id, id),
                         INDEX idx_recent_context_guild (guild_id, id)
                     )
                     """
                 )
-                await self._ensure_recent_context_channel_scope(cur)
                 await cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS aria_file_artifacts (
@@ -279,15 +259,6 @@ class LearningEngine:
                     """
                 )
         await self._seed_defaults()
-
-    async def _ensure_recent_context_channel_scope(self, cur) -> None:
-        """Backfill channel-scoped context columns/indexes on older Aria databases."""
-        await cur.execute("SHOW COLUMNS FROM aria_recent_context LIKE 'channel_id'")
-        if not await cur.fetchone():
-            await cur.execute("ALTER TABLE aria_recent_context ADD COLUMN channel_id BIGINT NULL AFTER guild_id")
-        await cur.execute("SHOW INDEX FROM aria_recent_context WHERE Key_name = 'idx_recent_context_channel'")
-        if not await cur.fetchone():
-            await cur.execute("CREATE INDEX idx_recent_context_channel ON aria_recent_context (user_id, guild_id, channel_id, id)")
 
     async def get_policy_hint(self, scope_key: str, issue_type: str) -> dict | None:
         if not db.pool:
@@ -469,8 +440,7 @@ class LearningEngine:
         *,
         user_id: int | None,
         guild_id: int | None,
-        channel_id: int | None = None,
-        source_kind: str = "chat",
+        source_kind: str,
         prompt: str,
         reply: str | None = None,
     ) -> None:
@@ -485,10 +455,10 @@ class LearningEngine:
                 await cur.execute(
                     """
                     INSERT INTO aria_recent_context (
-                        user_id, guild_id, channel_id, source_kind, prompt_text, reply_text
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                        user_id, guild_id, source_kind, prompt_text, reply_text
+                    ) VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (user_id, guild_id, channel_id, source_kind[:32], prompt_text, reply_text),
+                    (user_id, guild_id, source_kind[:32], prompt_text, reply_text),
                 )
                 await cur.execute(
                     """
@@ -502,7 +472,6 @@ class LearningEngine:
         *,
         user_id: int | None,
         guild_id: int | None,
-        channel_id: int | None = None,
         limit: int = 4,
     ) -> list[dict]:
         if not db.pool or (user_id is None and guild_id is None):
@@ -516,16 +485,13 @@ class LearningEngine:
         if user_id is not None:
             clauses.append("(user_id = %s OR user_id IS NULL)")
             params.append(user_id)
-        if channel_id is not None:
-            clauses.append("(channel_id = %s OR channel_id IS NULL)")
-            params.append(channel_id)
 
         where = " AND ".join(clauses)
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     f"""
-                    SELECT source_kind, prompt_text, reply_text, created_at, channel_id
+                    SELECT source_kind, prompt_text, reply_text, created_at
                     FROM aria_recent_context
                     WHERE {where}
                     ORDER BY id DESC
@@ -546,7 +512,6 @@ class LearningEngine:
                         "prompt_text": row[1],
                         "reply_text": row[2],
                         "created_at": row[3],
-                        "channel_id": row[4] if len(row) > 4 else None,
                     }
                 )
         return out
@@ -858,60 +823,29 @@ class LearningEngine:
                 rows = await cur.fetchall()
         return [f"{sig} -> {action} (S:{succ}/F:{fail})" for sig, action, succ, fail in rows]
 
-    async def recent_conversation_patterns(
-        self,
-        *,
-        limit: int = 8,
-        compatible_styles: set[str] | None = None,
-        exclude_styles: set[str] | None = None,
-    ) -> list[tuple[str, str, str | None, int]]:
+    async def recent_conversation_patterns(self, *, limit: int = 8) -> list[tuple[str, str, str | None, int]]:
         if not db.pool:
             return []
-
-        clauses = ["pattern_type = 'conversation'"]
-        params: list[object] = []
-        if compatible_styles:
-            placeholders = ", ".join(["%s"] * len(compatible_styles))
-            clauses.append(f"(response_style IN ({placeholders}) OR response_style IS NULL)")
-            params.extend(sorted(compatible_styles))
-        if exclude_styles:
-            placeholders = ", ".join(["%s"] * len(exclude_styles))
-            clauses.append(f"(response_style NOT IN ({placeholders}) OR response_style IS NULL)")
-            params.extend(sorted(exclude_styles))
-        where = " AND ".join(clauses)
-
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"""
+                    """
                     SELECT normalized_input, normalized_output, response_style, hit_count
                     FROM aria_conversation_patterns
-                    WHERE {where}
+                    WHERE pattern_type = 'conversation'
                     ORDER BY hit_count DESC, updated_at DESC
                     LIMIT %s
                     """,
-                    (*params, int(limit)),
+                    (limit,),
                 )
                 rows = await cur.fetchall()
         return [(row[0], row[1], row[2], row[3]) for row in rows]
 
-    async def similar_conversation_patterns(
-        self,
-        prompt: str,
-        *,
-        limit: int = 3,
-        response_style: str | None = None,
-    ) -> list[str]:
+    async def similar_conversation_patterns(self, prompt: str, *, limit: int = 3) -> list[str]:
         normalized_prompt = normalize_phrase(prompt)
         if not normalized_prompt:
             return []
-        style_family = compatible_response_styles(response_style)
-        excluded = TELEGRAM_RESPONSE_STYLES if style_family and not (style_family & TELEGRAM_RESPONSE_STYLES) else None
-        candidates = await self.recent_conversation_patterns(
-            limit=20,
-            compatible_styles=style_family,
-            exclude_styles=excluded,
-        )
+        candidates = await self.recent_conversation_patterns(limit=20)
         scored = []
         for inp, out, style, hit_count in candidates:
             score = SequenceMatcher(None, normalized_prompt, inp).ratio()
@@ -992,27 +926,16 @@ class LearningEngine:
         command_phrase: str | None = None,
         user_id: int | None = None,
         guild_id: int | None = None,
-        channel_id: int | None = None,
-        response_style: str | None = None,
     ) -> str:
         learned_terms = await self.sample_terms(limit=10)
         command_patterns = await self.top_command_patterns(limit=5)
         repair_patterns = await self.recent_repair_patterns(limit=4)
         command_families = await self.top_command_families(limit=6)
-        similar_conversations = await self.similar_conversation_patterns(prompt or "", limit=3, response_style=response_style)
+        similar_conversations = await self.similar_conversation_patterns(prompt or "", limit=3)
         similar_commands = await self.similar_command_patterns(command_phrase or prompt or "", limit=4)
         scoped_repair_hints = await self.action_success_hints(symptom_signature=normalize_phrase(prompt or "")[:255] if prompt else None, limit=3)
-        recent_context = await self.recent_context(user_id=user_id, guild_id=guild_id, channel_id=channel_id, limit=6)
+        recent_context = await self.recent_context(user_id=user_id, guild_id=guild_id, limit=4)
         parts = []
-        style_family = compatible_response_styles(response_style)
-        if style_family and TELEGRAM_RESPONSE_STYLES.isdisjoint(style_family):
-            parts.append(
-                "Style boundary: this is a Discord response. Ignore Telegram-learned compact menu phrasing and keep Aria's normal sharp Discord voice."
-            )
-        elif style_family and not TELEGRAM_RESPONSE_STYLES.isdisjoint(style_family):
-            parts.append(
-                "Style boundary: this is a Telegram bridge response. Keep it compact, but preserve Aria's bite and do not flatten into generic chatbot wording."
-            )
         if recent_context:
             snippets = []
             for entry in recent_context:

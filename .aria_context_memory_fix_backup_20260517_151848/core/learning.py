@@ -178,18 +178,15 @@ class LearningEngine:
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         user_id BIGINT NULL,
                         guild_id BIGINT NULL,
-                        channel_id BIGINT NULL,
                         source_kind VARCHAR(32) NOT NULL DEFAULT 'chat',
                         prompt_text TEXT NOT NULL,
                         reply_text TEXT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_recent_context_user_guild (user_id, guild_id, id),
-                        INDEX idx_recent_context_channel (user_id, guild_id, channel_id, id),
                         INDEX idx_recent_context_guild (guild_id, id)
                     )
                     """
                 )
-                await self._ensure_recent_context_channel_scope(cur)
                 await cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS aria_file_artifacts (
@@ -279,15 +276,6 @@ class LearningEngine:
                     """
                 )
         await self._seed_defaults()
-
-    async def _ensure_recent_context_channel_scope(self, cur) -> None:
-        """Backfill channel-scoped context columns/indexes on older Aria databases."""
-        await cur.execute("SHOW COLUMNS FROM aria_recent_context LIKE 'channel_id'")
-        if not await cur.fetchone():
-            await cur.execute("ALTER TABLE aria_recent_context ADD COLUMN channel_id BIGINT NULL AFTER guild_id")
-        await cur.execute("SHOW INDEX FROM aria_recent_context WHERE Key_name = 'idx_recent_context_channel'")
-        if not await cur.fetchone():
-            await cur.execute("CREATE INDEX idx_recent_context_channel ON aria_recent_context (user_id, guild_id, channel_id, id)")
 
     async def get_policy_hint(self, scope_key: str, issue_type: str) -> dict | None:
         if not db.pool:
@@ -469,8 +457,7 @@ class LearningEngine:
         *,
         user_id: int | None,
         guild_id: int | None,
-        channel_id: int | None = None,
-        source_kind: str = "chat",
+        source_kind: str,
         prompt: str,
         reply: str | None = None,
     ) -> None:
@@ -485,10 +472,10 @@ class LearningEngine:
                 await cur.execute(
                     """
                     INSERT INTO aria_recent_context (
-                        user_id, guild_id, channel_id, source_kind, prompt_text, reply_text
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                        user_id, guild_id, source_kind, prompt_text, reply_text
+                    ) VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (user_id, guild_id, channel_id, source_kind[:32], prompt_text, reply_text),
+                    (user_id, guild_id, source_kind[:32], prompt_text, reply_text),
                 )
                 await cur.execute(
                     """
@@ -502,7 +489,6 @@ class LearningEngine:
         *,
         user_id: int | None,
         guild_id: int | None,
-        channel_id: int | None = None,
         limit: int = 4,
     ) -> list[dict]:
         if not db.pool or (user_id is None and guild_id is None):
@@ -516,16 +502,13 @@ class LearningEngine:
         if user_id is not None:
             clauses.append("(user_id = %s OR user_id IS NULL)")
             params.append(user_id)
-        if channel_id is not None:
-            clauses.append("(channel_id = %s OR channel_id IS NULL)")
-            params.append(channel_id)
 
         where = " AND ".join(clauses)
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     f"""
-                    SELECT source_kind, prompt_text, reply_text, created_at, channel_id
+                    SELECT source_kind, prompt_text, reply_text, created_at
                     FROM aria_recent_context
                     WHERE {where}
                     ORDER BY id DESC
@@ -546,7 +529,6 @@ class LearningEngine:
                         "prompt_text": row[1],
                         "reply_text": row[2],
                         "created_at": row[3],
-                        "channel_id": row[4] if len(row) > 4 else None,
                     }
                 )
         return out
@@ -992,7 +974,6 @@ class LearningEngine:
         command_phrase: str | None = None,
         user_id: int | None = None,
         guild_id: int | None = None,
-        channel_id: int | None = None,
         response_style: str | None = None,
     ) -> str:
         learned_terms = await self.sample_terms(limit=10)
@@ -1002,7 +983,7 @@ class LearningEngine:
         similar_conversations = await self.similar_conversation_patterns(prompt or "", limit=3, response_style=response_style)
         similar_commands = await self.similar_command_patterns(command_phrase or prompt or "", limit=4)
         scoped_repair_hints = await self.action_success_hints(symptom_signature=normalize_phrase(prompt or "")[:255] if prompt else None, limit=3)
-        recent_context = await self.recent_context(user_id=user_id, guild_id=guild_id, channel_id=channel_id, limit=6)
+        recent_context = await self.recent_context(user_id=user_id, guild_id=guild_id, limit=4)
         parts = []
         style_family = compatible_response_styles(response_style)
         if style_family and TELEGRAM_RESPONSE_STYLES.isdisjoint(style_family):

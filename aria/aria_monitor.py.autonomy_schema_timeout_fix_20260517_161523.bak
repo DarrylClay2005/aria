@@ -224,15 +224,8 @@ class Monitor:
                             await self.bus.mark_processed(event["id"])
                     now = asyncio.get_running_loop().time()
                     if now - self._last_full_scan >= 8.0:
-                        try:
-                            await asyncio.wait_for(self.engine.run_once(), timeout=self._full_scan_timeout_seconds)
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "[Monitor] Autonomous engine scan exceeded %.1fs; skipping this pass instead of crashing the monitor loop.",
-                                self._full_scan_timeout_seconds,
-                            )
-                        finally:
-                            self._last_full_scan = now
+                        await asyncio.wait_for(self.engine.run_once(), timeout=self._full_scan_timeout_seconds)
+                        self._last_full_scan = now
             except asyncio.CancelledError:
                 raise
             except Exception:
