@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -91,7 +93,17 @@ class AutonomousEngine:
         self._event_auto_recovery_max_age_seconds = max(20, int(os.getenv('ARIA_EVENT_AUTO_RECOVERY_MAX_AGE_SECONDS', '180') or '180'))
         self._voice_timeout_pause_seconds = max(90, int(os.getenv('ARIA_VOICE_TIMEOUT_PAUSE_SECONDS', '240') or '240'))
         self._retry_exhausted_pause_seconds = max(90, int(os.getenv('ARIA_RETRY_EXHAUSTED_PAUSE_SECONDS', '180') or '180'))
-        self._infra_timeout_seconds = max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45'))
+        self._infra_timeout_seconds = min(300, max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45')))
+        self._infra_output_max_chars = max(512, min(20000, int(os.getenv('ARIA_INFRA_OUTPUT_MAX_CHARS', '4000') or '4000')))
+        allowed_execs = os.getenv(
+            'ARIA_INFRA_ALLOWED_EXECUTABLES',
+            'docker,docker-compose,systemctl,supervisorctl,service',
+        )
+        self._infra_allowed_executables = {
+            os.path.basename(item.strip())
+            for item in allowed_execs.split(',')
+            if item.strip()
+        }
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_auto_escalation_enabled = str(os.getenv('ARIA_AUTO_ESCALATE_INFRA_REPAIRS', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
@@ -451,8 +463,8 @@ class AutonomousEngine:
                         issue.get("guild_id"),
                         1 if success else 0,
                         execution_mode[:24],
-                        (command_text or "")[:4000] or None,
-                        (result_text or "")[:4000] or None,
+                        self._trim_infra_text(command_text) or None,
+                        self._trim_infra_text(result_text) or None,
                     ),
                 )
 
@@ -521,6 +533,44 @@ class AutonomousEngine:
             return True
         return False
 
+    def _redact_infra_text(self, value: str | None) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        patterns = [
+            (r"(?i)(--(?:password|token|secret|api-key)(?:=|\s+))([^\s]+)", r"\1[REDACTED]"),
+            (r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK)[A-Z0-9_]*=)([^\s]+)", r"\1[REDACTED]"),
+            (r"(?i)(https://discord(?:app)?\.com/api/webhooks/\d+/)[^\s]+", r"\1[REDACTED]"),
+        ]
+        redacted = text
+        for pattern, replacement in patterns:
+            redacted = re.sub(pattern, replacement, redacted)
+        return redacted
+
+    def _trim_infra_text(self, value: str | None) -> str:
+        return self._redact_infra_text(value)[:self._infra_output_max_chars]
+
+    def _infra_command_argv(self, command_text: str) -> tuple[list[str] | None, str | None]:
+        try:
+            argv = shlex.split(command_text)
+        except ValueError as exc:
+            return None, f"invalid infrastructure command syntax: {exc}"
+        if not argv:
+            return None, "no configured command for target"
+        blocked_tokens = {";", "&&", "||", "|", ">", ">>", "<", "<<", "&"}
+        shell_names = {"sh", "bash", "dash", "zsh", "fish"}
+        executable = os.path.basename(argv[0])
+        if any(part in blocked_tokens for part in argv) or executable in shell_names:
+            return None, "infrastructure command uses shell syntax; configure a direct executable and arguments instead"
+        if self._infra_allowed_executables and executable not in self._infra_allowed_executables:
+            return None, f"infrastructure command executable is not allowlisted: {executable}"
+        resolved = shutil.which(argv[0])
+        if not resolved:
+            return None, f"infrastructure command executable was not found: {argv[0]}"
+        if len(argv) > 32:
+            return None, "infrastructure command has too many arguments"
+        return [resolved, *argv[1:]], None
+
     async def _execute_infra_task(self, task: dict[str, Any]) -> tuple[bool, str, str]:
         command_text = str(task.get("command_text") or self._infra_command_for_target(task.get("target_name")) or "").strip()
         if not self._infra_auto_escalation_enabled and str(task.get("issue_type") or "") not in {"manual_restart", "operator_restart"}:
@@ -530,28 +580,29 @@ class AutonomousEngine:
         if not command_text:
             return False, "manual", "no configured command for target"
         if not self._infra_allow_execute:
-            return False, "planned", f"command prepared but execution disabled: {command_text}"
+            return False, "planned", f"command prepared but execution disabled: {self._trim_infra_text(command_text)}"
+        argv, reject_reason = self._infra_command_argv(command_text)
+        if reject_reason:
+            return False, "rejected", reject_reason
+        assert argv is not None
+        proc: asyncio.subprocess.Process | None = None
         try:
-            try:
-                argv = shlex.split(command_text)
-            except ValueError as exc:
-                return False, "rejected", f"invalid infrastructure command syntax: {exc}"
-            if not argv:
-                return False, "manual", "no configured command for target"
-            blocked_tokens = {";", "&&", "||", "|", ">", ">>", "<", "<<", "&"}
-            shell_names = {"sh", "bash", "dash", "zsh", "fish"}
-            if any(part in blocked_tokens for part in argv) or os.path.basename(argv[0]) in shell_names:
-                return False, "rejected", "infrastructure command uses shell syntax; configure a direct executable and arguments instead"
             proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._infra_timeout_seconds)
             out = (stdout or b"").decode("utf-8", "ignore").strip()
             err = (stderr or b"").decode("utf-8", "ignore").strip()
             combined = ("\n".join([p for p in [out, err] if p]) or f"exit={proc.returncode}").strip()
-            return proc.returncode == 0, "executed", combined[:4000]
+            return proc.returncode == 0, "executed", self._trim_infra_text(combined)
         except asyncio.TimeoutError:
+            if proc and proc.returncode is None:
+                proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except Exception as exc:
+                    logger.debug("Suppressed best-effort autonomy failure: %s", exc)
             return False, "executed", f"command timed out after {self._infra_timeout_seconds}s"
         except Exception as exc:
-            return False, "executed", f"{type(exc).__name__}: {exc}"
+            return False, "executed", self._trim_infra_text(f"{type(exc).__name__}: {exc}")
 
     async def run_pending_infra_tasks(self) -> None:
         if not db.pool:
@@ -569,6 +620,7 @@ class AutonomousEngine:
             except Exception:
                 issue = {"type": task.get("issue_type"), "drone": task.get("bot_name"), "guild_id": task.get("guild_id")}
             success, mode, result_text = await self._execute_infra_task(task)
+            result_text = self._trim_infra_text(result_text)
             new_attempts = int(task.get("attempt_count") or 0) + 1
             max_attempts = int(task.get("max_attempts") or 2)
             status = "resolved" if success else ("manual_needed" if mode in {"manual", "planned", "disabled", "guarded"} else ("failed" if new_attempts >= max_attempts else "pending"))
@@ -577,12 +629,12 @@ class AutonomousEngine:
                     if status == "pending":
                         await cur.execute(
                             "UPDATE aria_infra_tasks SET attempt_count=%s, due_at=DATE_ADD(NOW(), INTERVAL %s SECOND), last_result=%s WHERE id=%s",
-                            (new_attempts, int(self._infra_followup_delay), result_text[:4000], task["id"])
+                            (new_attempts, int(self._infra_followup_delay), result_text, task["id"])
                         )
                     else:
                         await cur.execute(
                             "UPDATE aria_infra_tasks SET status=%s, attempt_count=%s, last_result=%s WHERE id=%s",
-                            (status, new_attempts, result_text[:4000], task["id"])
+                            (status, new_attempts, result_text, task["id"])
                         )
             await self._record_infra_history(target=str(task.get("target_name") or "unknown"), action=str(task.get("action_name") or "restart"), issue=issue, success=success, execution_mode=mode, command_text=str(task.get("command_text") or "") or None, result_text=result_text)
             try:

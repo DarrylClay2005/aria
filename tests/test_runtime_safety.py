@@ -1,6 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
+import sys
+
+import pytest
 
 from core.ai_service import AIService
+from core.autonomy import AutonomousEngine
 
 
 def test_ai_service_prefers_prefixed_api_key(monkeypatch):
@@ -58,3 +63,91 @@ def test_refactored_cogs_no_longer_define_local_db_config():
         assert 'DB_CONFIG =' not in text, path
         assert 'create_pool(**DB_CONFIG)' not in text, path
         assert 'db_cursor(' in text, path
+
+
+@pytest.mark.asyncio
+async def test_infra_planned_command_redacts_sensitive_values(monkeypatch):
+    monkeypatch.setenv("ARIA_ENABLE_INFRA_CONTROL", "1")
+    monkeypatch.setenv("ARIA_ALLOW_INFRA_EXEC", "0")
+    monkeypatch.setenv("ARIA_AUTO_ESCALATE_INFRA_REPAIRS", "1")
+    engine = AutonomousEngine(SimpleNamespace())
+
+    success, mode, result = await engine._execute_infra_task(
+        {"command_text": "docker login --password super-secret TOKEN=abc123"}
+    )
+
+    assert success is False
+    assert mode == "planned"
+    assert "super-secret" not in result
+    assert "abc123" not in result
+    assert "[REDACTED]" in result
+
+
+@pytest.mark.asyncio
+async def test_infra_execution_rejects_disallowed_executable(monkeypatch):
+    monkeypatch.setenv("ARIA_ENABLE_INFRA_CONTROL", "1")
+    monkeypatch.setenv("ARIA_ALLOW_INFRA_EXEC", "1")
+    monkeypatch.setenv("ARIA_AUTO_ESCALATE_INFRA_REPAIRS", "1")
+    monkeypatch.setenv("ARIA_INFRA_ALLOWED_EXECUTABLES", "systemctl")
+    engine = AutonomousEngine(SimpleNamespace())
+
+    success, mode, result = await engine._execute_infra_task(
+        {"command_text": f"{sys.executable} --version"}
+    )
+
+    assert success is False
+    assert mode == "rejected"
+    assert "not allowlisted" in result
+
+
+@pytest.mark.asyncio
+async def test_infra_execution_checks_missing_executable(monkeypatch):
+    monkeypatch.setenv("ARIA_ENABLE_INFRA_CONTROL", "1")
+    monkeypatch.setenv("ARIA_ALLOW_INFRA_EXEC", "1")
+    monkeypatch.setenv("ARIA_AUTO_ESCALATE_INFRA_REPAIRS", "1")
+    monkeypatch.setenv("ARIA_INFRA_ALLOWED_EXECUTABLES", "definitely-not-real-aria-command")
+    engine = AutonomousEngine(SimpleNamespace())
+
+    success, mode, result = await engine._execute_infra_task(
+        {"command_text": "definitely-not-real-aria-command restart"}
+    )
+
+    assert success is False
+    assert mode == "rejected"
+    assert "was not found" in result
+
+
+@pytest.mark.asyncio
+async def test_infra_execution_redacts_command_output(monkeypatch):
+    monkeypatch.setenv("ARIA_ENABLE_INFRA_CONTROL", "1")
+    monkeypatch.setenv("ARIA_ALLOW_INFRA_EXEC", "1")
+    monkeypatch.setenv("ARIA_AUTO_ESCALATE_INFRA_REPAIRS", "1")
+    monkeypatch.setenv("ARIA_INFRA_ALLOWED_EXECUTABLES", "echo")
+    engine = AutonomousEngine(SimpleNamespace())
+
+    success, mode, result = await engine._execute_infra_task(
+        {"command_text": "echo TOKEN=abc123"}
+    )
+
+    assert success is True
+    assert mode == "executed"
+    assert "abc123" not in result
+    assert "TOKEN=[REDACTED]" in result
+
+
+@pytest.mark.asyncio
+async def test_infra_timeout_kills_process(monkeypatch):
+    monkeypatch.setenv("ARIA_ENABLE_INFRA_CONTROL", "1")
+    monkeypatch.setenv("ARIA_ALLOW_INFRA_EXEC", "1")
+    monkeypatch.setenv("ARIA_AUTO_ESCALATE_INFRA_REPAIRS", "1")
+    monkeypatch.setenv("ARIA_INFRA_ALLOWED_EXECUTABLES", "sleep")
+    engine = AutonomousEngine(SimpleNamespace())
+    engine._infra_timeout_seconds = 0.01
+
+    success, mode, result = await engine._execute_infra_task(
+        {"command_text": "sleep 5"}
+    )
+
+    assert success is False
+    assert mode == "executed"
+    assert "timed out" in result
