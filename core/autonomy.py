@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import shlex
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -531,7 +532,17 @@ class AutonomousEngine:
         if not self._infra_allow_execute:
             return False, "planned", f"command prepared but execution disabled: {command_text}"
         try:
-            proc = await asyncio.create_subprocess_shell(command_text, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                argv = shlex.split(command_text)
+            except ValueError as exc:
+                return False, "rejected", f"invalid infrastructure command syntax: {exc}"
+            if not argv:
+                return False, "manual", "no configured command for target"
+            blocked_tokens = {";", "&&", "||", "|", ">", ">>", "<", "<<", "&"}
+            shell_names = {"sh", "bash", "dash", "zsh", "fish"}
+            if any(part in blocked_tokens for part in argv) or os.path.basename(argv[0]) in shell_names:
+                return False, "rejected", "infrastructure command uses shell syntax; configure a direct executable and arguments instead"
+            proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._infra_timeout_seconds)
             out = (stdout or b"").decode("utf-8", "ignore").strip()
             err = (stderr or b"").decode("utf-8", "ignore").strip()
