@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import unescape
 import io
+import logging
 import json
 from pathlib import Path
 import re
@@ -14,6 +15,8 @@ from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps, UnidentifiedImageError
 
+
+logger = logging.getLogger("discord")
 
 RESAMPLING = Image.Resampling if hasattr(Image, "Resampling") else Image
 DEFAULT_FONT_PATHS = (
@@ -221,8 +224,8 @@ def _resolve_realesrgan_binary(binary_path: str | Path) -> Path:
             if not os.access(candidate, os.X_OK):
                 try:
                     candidate.chmod(candidate.stat().st_mode | 0o111)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("Could not mark Real-ESRGAN binary executable: %s", exc)
             if os.access(candidate, os.X_OK):
                 return candidate
 

@@ -10,3 +10,10 @@ venv
 *.py[cod]
 *.log
 *.mp4
+.aria_*_backup_*
+*_backup_*
+models/
+realesrgan-ncnn-vulkan
+*.db
+*.sqlite
+*.sqlite3

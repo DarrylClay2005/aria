@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -14,6 +15,8 @@ except ImportError:  # pragma: no cover - optional in lightweight local test she
 from core.database import db
 from core.override import override_manager
 
+
+logger = logging.getLogger("discord")
 
 DRONE_NAMES = ("gws", "harmonic", "maestro", "melodic", "nexus", "rhythm", "symphony", "tunestream", "alucard", "sapphire", "strife", "lockhart")
 DRONE_SCHEMA_OVERRIDES = {
@@ -116,6 +119,30 @@ def normalize_drone_name(name: str | None) -> str | None:
         return None
     cleaned = name.strip().lower()
     return cleaned if cleaned in DRONE_NAMES else None
+
+
+def unknown_drone_message(drone: str | None) -> str:
+    return f"Unknown swarm node `{drone}`. Valid nodes: {', '.join(DRONE_NAMES)}."
+
+
+def _is_benign_schema_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in (
+        "duplicate column",
+        "duplicate key",
+        "already exists",
+        "check that column/key exists",
+    ))
+
+
+async def _run_schema_statement(cur, stmt: str, *, bot_name: str, label: str) -> None:
+    try:
+        await cur.execute(stmt)
+    except Exception as exc:
+        if _is_benign_schema_error(exc):
+            logger.debug("Schema already compatible for %s while applying %s: %s", bot_name, label, exc)
+        else:
+            logger.warning("Schema migration issue for %s while applying %s: %s", bot_name, label, exc)
 
 
 def extract_drone_name(text: str) -> str | None:
@@ -230,23 +257,20 @@ async def _ensure_direct_order_schema_uncached(cur, bot_name: str) -> None:
         )
         """
     )
-    for stmt in (
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN vc_id BIGINT NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN text_channel_id BIGINT NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN command VARCHAR(50) NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN data TEXT NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN attempts INT NOT NULL DEFAULT 0",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN last_error TEXT NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN claimed_at TIMESTAMP NULL",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)",
-        f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)",
+    for label, stmt in (
+        ("direct_orders.id", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders MODIFY COLUMN id BIGINT NOT NULL AUTO_INCREMENT"),
+        ("direct_orders.vc_id", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN vc_id BIGINT NULL"),
+        ("direct_orders.text_channel_id", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN text_channel_id BIGINT NULL"),
+        ("direct_orders.command", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN command VARCHAR(50) NULL"),
+        ("direct_orders.data", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN data TEXT NULL"),
+        ("direct_orders.attempts", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN attempts INT NOT NULL DEFAULT 0"),
+        ("direct_orders.last_error", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN last_error TEXT NULL"),
+        ("direct_orders.claimed_at", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN claimed_at TIMESTAMP NULL"),
+        ("direct_orders.created_at", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("direct_orders.idx_unclaimed", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_unclaimed (bot_name, guild_id, claimed_at, id)"),
+        ("direct_orders.idx_recent_command", f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_swarm_direct_orders ADD INDEX idx_recent_command (bot_name, guild_id, command, created_at)"),
     ):
-        try:
-            await cur.execute(stmt)
-        except Exception:
-            pass
+        await _run_schema_statement(cur, stmt, bot_name=bot_name, label=label)
 
 
 async def insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | None, text_channel_id: int | None, command: str, data: str | None = None, *, dedupe: bool = True) -> None:
@@ -290,13 +314,12 @@ async def _ensure_guild_settings_schema_uncached(cur, bot_name: str) -> None:
         "(guild_id BIGINT PRIMARY KEY)"
     )
     for column_name, definition in GUILD_SETTINGS_COLUMNS:
-        try:
-            await cur.execute(
-                f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_guild_settings "
-                f"ADD COLUMN {column_name} {definition}"
-            )
-        except Exception:
-            pass
+        await _run_schema_statement(
+            cur,
+            f"ALTER TABLE {schema_for_drone(bot_name)}.{bot_name}_guild_settings ADD COLUMN {column_name} {definition}",
+            bot_name=bot_name,
+            label=f"guild_settings.{column_name}",
+        )
 
 
 async def ensure_music_intelligence_schema(cur, bot_name: str) -> None:
@@ -344,16 +367,13 @@ async def _ensure_music_intelligence_schema_uncached(cur, bot_name: str) -> None
         "seed_title TEXT, seed_url TEXT, query_text TEXT, chosen_url TEXT, chosen_title TEXT, "
         "reason VARCHAR(80), accepted BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
-    for stmt in (
-        f"CREATE INDEX {bot_name}_track_intelligence_recent_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_played)",
-        f"CREATE INDEX {bot_name}_track_intelligence_requester_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_requester_id, last_played)",
-        f"CREATE INDEX {bot_name}_user_affinity_recent_idx ON {schema}.{bot_name}_user_track_affinity (guild_id, user_id, last_requested)",
-        f"CREATE INDEX {bot_name}_smart_recommendations_recent_idx ON {schema}.{bot_name}_smart_recommendations (guild_id, created_at)",
+    for label, stmt in (
+        ("track_intelligence.recent_idx", f"CREATE INDEX {bot_name}_track_intelligence_recent_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_played)"),
+        ("track_intelligence.requester_idx", f"CREATE INDEX {bot_name}_track_intelligence_requester_idx ON {schema}.{bot_name}_track_intelligence (guild_id, last_requester_id, last_played)"),
+        ("user_affinity.recent_idx", f"CREATE INDEX {bot_name}_user_affinity_recent_idx ON {schema}.{bot_name}_user_track_affinity (guild_id, user_id, last_requested)"),
+        ("smart_recommendations.recent_idx", f"CREATE INDEX {bot_name}_smart_recommendations_recent_idx ON {schema}.{bot_name}_smart_recommendations (guild_id, created_at)"),
     ):
-        try:
-            await cur.execute(stmt)
-        except Exception:
-            pass
+        await _run_schema_statement(cur, stmt, bot_name=bot_name, label=label)
 
 
 class SwarmController:
@@ -731,6 +751,8 @@ class SwarmController:
             return "Direct swarm orders only work inside a server."
 
         preferred = normalize_drone_name(drone)
+        if drone and preferred is None:
+            return unknown_drone_message(drone)
         if preferred:
             return await self.direct(ctx, preferred, "LEAVE")
 
@@ -853,6 +875,8 @@ class SwarmController:
         guild_id = guild_id_from_ctx(ctx)
         # FIX: normalize once so we never put None into the target list
         normalized_drone = normalize_drone_name(drone)
+        if drone and normalized_drone is None:
+            return unknown_drone_message(drone)
         targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
 
         # FIX: guard against uninitialized pool
@@ -876,6 +900,8 @@ class SwarmController:
             return "I need a Discord server context before I can inspect swarm queues. For Telegram, set `ARIA_TELEGRAM_DEFAULT_GUILD_ID` to the server id, then restart me."
 
         bot_name = normalize_drone_name(drone)
+        if drone and bot_name is None:
+            return unknown_drone_message(drone)
         if bot_name is None:
             active = await self.active_drones(guild_id)
             bot_name = active[0] if active else "gws"
@@ -1085,6 +1111,8 @@ class SwarmController:
         guild_id = guild_id_from_ctx(ctx)
         # FIX: normalize once to avoid [None] in target list when drone is invalid/absent
         normalized_drone = normalize_drone_name(drone)
+        if drone and normalized_drone is None:
+            return unknown_drone_message(drone)
         targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
         shuffled = []
 
@@ -1162,6 +1190,8 @@ class SwarmController:
         guild_id = guild_id_from_ctx(ctx)
         # FIX: normalize once so we never put None into the target list
         normalized_drone = normalize_drone_name(drone)
+        if drone and normalized_drone is None:
+            return unknown_drone_message(drone)
         targets = [normalized_drone] if normalized_drone else list(DRONE_NAMES)
 
         # FIX: guard against uninitialized pool

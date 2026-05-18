@@ -89,6 +89,15 @@ def _install_discord_stub() -> None:
     app_commands.Group = _DummyGroup
     app_commands.ContextMenu = _DummyContextMenu
 
+
+    def _identity_command_decorator(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+    app_commands.describe = _identity_command_decorator
+    app_commands.rename = _identity_command_decorator
+
     ext = types.ModuleType("discord.ext")
     commands = types.ModuleType("discord.ext.commands")
     class _DummyCog: ...

@@ -4,9 +4,12 @@ import base64
 from dataclasses import dataclass
 from html import unescape
 import json
+import logging
 import re
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
+
+logger = logging.getLogger("discord")
 
 @dataclass(slots=True)
 class VideoCandidate:
@@ -74,8 +77,8 @@ def _unwrap_bing_redirect(url: str) -> str:
                         decoded = base64.urlsafe_b64decode(f"{candidate}{padding}").decode("utf-8")
                         if decoded:
                             candidate = decoded
-                    except (ValueError, UnicodeDecodeError):
-                        pass
+                    except (ValueError, UnicodeDecodeError) as exc:
+                        logger.debug("Could not decode Bing video redirect token: %s", exc)
                 return _clean_url(unquote(candidate))
     return _clean_url(url)
 

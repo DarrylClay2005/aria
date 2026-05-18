@@ -200,8 +200,8 @@ class Monitor:
                                         ("Event Type", str(event.get("event_type", "unknown"))[:128], True),
                                     ],
                                 )
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Suppressed monitor notification failure: %s", exc)
                         try:
                             if self._should_publish_event(event):
                                 payload = dict(event.get("payload") or {})

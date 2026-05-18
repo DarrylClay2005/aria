@@ -175,8 +175,8 @@ class VideoResultView(discord.ui.View):
         if self.message:
             try:
                 await self.message.edit(view=self)
-            except (discord.HTTPException, discord.NotFound):
-                pass
+            except (discord.HTTPException, discord.NotFound) as exc:
+                logger.debug("Video ops best-effort UI cleanup failed: %s", exc)
 
     async def _prev(self, interaction: discord.Interaction) -> None:
         self.index = (self.index - 1) % len(self.results)
@@ -206,8 +206,8 @@ class VideoResultView(discord.ui.View):
                 await interaction.response.send_message(content)
             else:
                 await interaction.followup.send(content)
-        except discord.HTTPException:
-            pass
+        except discord.HTTPException as exc:
+            logger.debug("Video ops best-effort UI cleanup failed: %s", exc)
 
     async def _shuffle(self, interaction: discord.Interaction) -> None:
         import random
@@ -245,8 +245,8 @@ class VideoOps(commands.Cog):
     def cog_unload(self) -> None:
         try:
             asyncio.get_running_loop().create_task(VideoHTTPSession.close())
-        except RuntimeError:
-            pass
+        except RuntimeError as exc:
+            logger.debug("Video ops best-effort UI cleanup failed: %s", exc)
 
     async def ensure_video_tables(self) -> None:
         if not db.pool:
@@ -467,14 +467,14 @@ class VideoOps(commands.Cog):
             if not interaction.response.is_done():
                 await interaction.response.edit_message(embed=embed, view=view)
                 return
-        except (discord.HTTPException, discord.NotFound):
-            pass
+        except (discord.HTTPException, discord.NotFound) as exc:
+            logger.debug("Video ops best-effort UI cleanup failed: %s", exc)
         try:
             if view.message:
                 await view.message.edit(embed=embed, view=view)
                 return
-        except (discord.HTTPException, discord.NotFound):
-            pass
+        except (discord.HTTPException, discord.NotFound) as exc:
+            logger.debug("Video ops best-effort UI cleanup failed: %s", exc)
         if interaction.channel:
             msg = await interaction.channel.send(embed=embed, view=view)
             view.message = msg

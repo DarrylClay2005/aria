@@ -224,8 +224,8 @@ class AriaBot(commands.Bot):
                     continue
                 try:
                     allowed.add(int(chunk))
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    logger.debug("Ignoring invalid ARIA_TELEGRAM_ADMIN_CHAT_IDS entry %r: %s", chunk, exc)
             return normalized in allowed
         return str(os.getenv("ARIA_TELEGRAM_TRUST_ALL_CHATS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -631,8 +631,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
-    except discord.HTTPException:
-        pass
+    except discord.HTTPException as exc:
+        logger.debug("Could not send slash-command failure response: %s", exc)
 
 
 @bot.event
@@ -644,8 +644,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     await send_error_webhook_log("Aria Prefix Command Error", str(error), traceback_text="".join(__import__("traceback").format_exception(type(error), error, error.__traceback__)))
     try:
         await ctx.send("That command died mid-flight. Check the logs and fix the stack trace.")
-    except discord.HTTPException:
-        pass
+    except discord.HTTPException as exc:
+        logger.debug("Could not send prefix-command failure response: %s", exc)
 
 # ================================
 # 🔑 START BOT

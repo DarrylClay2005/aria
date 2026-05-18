@@ -105,8 +105,8 @@ async def _ensure_direct_orders(cur, bot_name: str) -> None:
     ):
         try:
             await cur.execute(stmt)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
 
 
 async def _insert_direct_order(cur, bot_name: str, guild_id: int, vc_id: int | None, text_channel_id: int | None, command: str, data: str | None = None, *, dedupe: bool = True) -> None:
@@ -150,8 +150,8 @@ async def _current_track(cur, bot_name: str, guild_id: int, state: dict[str, Any
         row = await cur.fetchone()
         if row:
             return str(row.get("title") if isinstance(row, dict) else row[0])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
     return "Unknown / no live title in DB"
 
 
@@ -416,8 +416,8 @@ class SwarmAdmin(commands.Cog):
                             logger.debug("Queue purge skipped for %s: %s", b, exc)
                         try:
                             await cur.execute(f"DELETE FROM {_q(b, 'queue_backup')} WHERE guild_id = %s", (interaction.guild_id,))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
                     await conn.commit()
             await interaction.followup.send(f"☢️ **Purge complete:** committed STOP overrides and queue cleanup for {len(bots)} node(s).")
         except Exception as e:
@@ -455,8 +455,8 @@ class SwarmAdmin(commands.Cog):
                             for row in await cur.fetchall():
                                 title = row.get('title') or 'Unknown'
                                 track_counts[title] = track_counts.get(title, 0) + 1
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
             if not track_counts:
                 return await interaction.followup.send("📊 Not enough analytics data collected yet.")
             desc = "".join(f"**{i}.** {title} — `{count} plays`\n" for i, (title, count) in enumerate(sorted(track_counts.items(), key=lambda x: x[1], reverse=True)[:5], 1))
@@ -738,8 +738,8 @@ class SwarmAdmin(commands.Cog):
                         try:
                             await cur.execute(f"SELECT status, TIMESTAMPDIFF(SECOND, last_pulse, NOW()) AS heartbeat_age FROM `{_db_name(b)}`.`swarm_health` WHERE bot_name = %s LIMIT 1", (b,))
                             health_row = await cur.fetchone()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
                         try:
                             await cur.execute(
                                 f"SELECT voice_connected, player_playing, player_paused, queue_count, backup_queue_count, lavalink_ready, last_error, heartbeat_age_seconds "
@@ -747,8 +747,8 @@ class SwarmAdmin(commands.Cog):
                                 (interaction.guild_id, b),
                             )
                             metric_row = await cur.fetchone()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort swarm-admin failure: %s", exc)
                         heartbeat_age = health_row.get("heartbeat_age") if health_row else None
                         heartbeat_label = f"{heartbeat_age}s ago" if heartbeat_age is not None else "unknown"
                         if metric_row:

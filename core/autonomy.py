@@ -263,14 +263,14 @@ class AutonomousEngine:
         if issue.get('predictive_pressure'):
             try:
                 base += min(0.10, float(issue.get('predictive_pressure') or 0) * 0.10)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         if issue.get('issue_count') and issue.get('baseline_issue_count'):
             try:
                 ratio = float(issue['issue_count']) / max(float(issue['baseline_issue_count']), 1.0)
                 base += min(0.12, max(0.0, ratio - 1.0) * 0.08)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         return max(0.0, min(1.0, base))
 
     def _urgency_label(self, score: float) -> str:
@@ -477,8 +477,8 @@ class AutonomousEngine:
                     f"Suppressed automatic {action} for {target}.",
                     fields=[("Reason", reason[:512], False), ("Issue", str(issue.get('type') or 'unknown')[:128], True)],
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
             return False
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -505,8 +505,8 @@ class AutonomousEngine:
         await self._record_infra_history(target=target, action=action, issue=issue, success=False, execution_mode="planned", command_text=command_text, result_text=reason)
         try:
             await send_ops_webhook_log("Aria Infra Escalation", f"Queued {action} for {target}.", fields=[("Reason", reason[:512], False), ("Issue", str(issue.get('type') or 'unknown')[:128], True)])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         return True
 
     def _should_escalate_infra(self, issue: dict[str, Any], *, attempts: int = 0) -> bool:
@@ -581,8 +581,8 @@ class AutonomousEngine:
                     await send_ops_webhook_log("Aria Infra Manual Action Needed", f"Prepared {task.get('action_name')} for {task.get('target_name')}, but manual follow-through is needed.", fields=[("Reason", result_text[:512], False)])
                 elif status == "failed":
                     await send_error_webhook_log("Aria Infra Failure", result_text[:512] or "unknown infra failure", traceback_text=None)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
 
     async def _schedule_repair_followup(self, issue: dict[str, Any], *, strategy_index: int, attempt_count: int, last_result: str = "") -> None:
         if not db.pool:
@@ -866,13 +866,13 @@ class AutonomousEngine:
                 continue
             try:
                 profile["confidence_bias"] += float(hint.get("confidence_bias") or 0.0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
             try:
                 cooldown = float(hint.get("preferred_cooldown_seconds") or self._cooldown_seconds)
                 profile["preferred_cooldown_seconds"] = min(profile["preferred_cooldown_seconds"], cooldown)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         profile["confidence_bias"] = max(-0.25, min(0.25, profile["confidence_bias"]))
         return profile
 
@@ -1242,8 +1242,8 @@ class AutonomousEngine:
         ]:
             try:
                 await cur.execute(stmt)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         for table_key in ("queue", "backup"):
             table = cfg[table_key]
             try:
@@ -1254,14 +1254,14 @@ class AutonomousEngine:
                     except Exception:
                         try:
                             await cur.execute(f"ALTER TABLE {schema}.{table} DROP PRIMARY KEY")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
                         try:
                             await cur.execute(f"ALTER TABLE {schema}.{table} ADD COLUMN id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        except Exception as exc:
+                            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         for stmt in [
             f"UPDATE {schema}.{cfg['playback']} SET bot_name = COALESCE(bot_name, '{drone}') WHERE bot_name IS NULL OR bot_name = ''",
             f"UPDATE {schema}.{cfg['playback']} SET current_track = COALESCE(NULLIF(current_track, ''), NULLIF(video_url, ''), NULLIF(title, '')) WHERE current_track IS NULL OR current_track = ''",
@@ -1281,16 +1281,16 @@ class AutonomousEngine:
         ]:
             try:
                 await cur.execute(stmt)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         try:
             await cur.execute(f"ALTER TABLE {schema}.{cfg['queue']} ADD INDEX idx_guild_position (guild_id, position)")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         try:
             await cur.execute(f"ALTER TABLE {schema}.{cfg['backup']} ADD INDEX idx_guild_position (guild_id, position)")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
 
     async def _fetchone(self, cur, query: str, params=()):
         await cur.execute(query, params)
@@ -1429,8 +1429,8 @@ class AutonomousEngine:
                                 "drone": row.get("bot_name", drone),
                                 "stale_seconds": int(row.get("stale_seconds") or 0),
                             })
-                    except Exception:
-                        pass
+                    except Exception as notify_exc:
+                        logger.debug("Autonomy ops notification failed: %s", notify_exc)
                     try:
                         playback_query = await self._compat_playback_select(cur, drone)
                         playback_rows = await self._fetchall(cur, playback_query)
@@ -1619,8 +1619,8 @@ class AutonomousEngine:
                 f"DELETE FROM {cfg['schema']}.{cfg['direct']} WHERE bot_name=%s AND guild_id=%s AND command=%s",
                 (drone, guild_id, command),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         await cur.execute(
             f"INSERT INTO {cfg['schema']}.{cfg['direct']} (bot_name, guild_id, vc_id, text_channel_id, command, data) VALUES (%s, %s, %s, %s, %s, %s)",
             (drone, guild_id, vc_id if vc_id else None, text_channel_id if text_channel_id else None, command, data or "aria"),
@@ -1645,8 +1645,8 @@ class AutonomousEngine:
             ) or {}
             live_queue_count = int(counts.get("queue_count") or live_queue_count)
             live_backup_count = int(counts.get("backup_count") or live_backup_count)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         if playback:
             if self._to_bool(playback.get("is_paused")):
                 return RepairResult(True, "recover_skipped_paused", drone, details="playback is paused; RECOVER not needed")
@@ -1658,8 +1658,8 @@ class AutonomousEngine:
                     age = max(0.0, time.time() - updated_at.timestamp())
                     if age < self._state_recovery_min_age_seconds:
                         return RepairResult(True, "recover_skipped_fresh", drone, details=f"playback state is only {int(age)}s old")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         if live_queue_count <= 0 and live_backup_count <= 0 and not (playback or {}).get("current_track") and not issue.get("current_track"):
             return RepairResult(False, "recover_skipped_empty", drone, details="no queue, backup queue, or current track to recover")
         vc_id = issue.get("home_vc_id") or issue.get("channel_id") or (playback or {}).get("channel_id")
@@ -1930,8 +1930,8 @@ class AutonomousEngine:
             try:
                 await self._journal_repair(issue, RepairResult(False, issue.get("type", "repair"), issue.get("drone", "swarm")), error=str(e))
                 await send_error_webhook_log("Aria Medic Repair Error", str(e), traceback_text=None)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         return False
 
 

@@ -176,8 +176,8 @@ class ImageCarousel(discord.ui.View):
         if self.message:
             try:
                 await self.message.edit(view=self)
-            except (discord.HTTPException, discord.NotFound):
-                pass
+            except (discord.HTTPException, discord.NotFound) as exc:
+                logger.debug("Image ops best-effort UI cleanup failed: %s", exc)
 
     async def _handle_prev(self, interaction: discord.Interaction) -> None:
         self.nav_step = -1
@@ -237,8 +237,8 @@ class ImageOps(commands.Cog):
         self.bot.tree.remove_command(self.ctx_source.name, type=self.ctx_source.type)
         try:
             asyncio.get_running_loop().create_task(HTTPSessionManager.close())
-        except RuntimeError:
-            pass
+        except RuntimeError as exc:
+            logger.debug("Image ops best-effort UI cleanup failed: %s", exc)
 
     @staticmethod
     def rendered_to_file(rendered: RenderedImage, stem: str) -> discord.File:

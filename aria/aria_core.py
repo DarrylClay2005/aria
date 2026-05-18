@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from collections import defaultdict, deque
@@ -9,6 +10,8 @@ from core.commands import router
 from core.ai_service import AIService
 from core.learning import LearningEngine
 from core.override import override_manager
+
+logger = logging.getLogger("discord")
 
 DEFAULT_CHAT_SYSTEM_INSTRUCTION = (
     "You are Aria Blaze, a confident AI assistant with a sharp tongue, excellent recall, and strong technical instincts. "
@@ -233,8 +236,8 @@ class AriaCore:
                     limit=limit,
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Aria dialogue context lookup failed: %s", exc)
         entries.extend(self._volatile_context(user_id=user_id, guild_id=guild_id, channel_id=channel_id, limit=limit))
 
         deduped: list[dict] = []
@@ -522,8 +525,8 @@ class AriaCore:
         # observe_text is best-effort: a DB hiccup here must not silence Aria.
         try:
             await self.observe_text(user_id=user_id, guild_id=guild_id, text=prompt_for_memory, source_kind="prompt")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Aria prompt observation failed: %s", exc)
 
         # build_prompt_fragment and craft_insult_seed hit multiple DB tables.
         # If the DB is mid-reset or the tables don't exist yet, fall back to
@@ -537,12 +540,14 @@ class AriaCore:
                 channel_id=channel_id,
                 response_style=response_style or source_kind,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Aria prompt fragment build failed: %s", exc)
             prompt_fragment = ""
 
         try:
             insult_seed = await self.learning.craft_insult_seed(user_name or "you", prompt_for_memory)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Aria insult seed build failed: %s", exc)
             insult_seed = ""
 
         requested_style = response_style or source_kind
@@ -566,7 +571,8 @@ class AriaCore:
             try:
                 from core.swarm_control import swarm_controller
                 swarm_context_block = await swarm_controller.live_swarm_context(int(guild_id), prompt=prompt_for_memory)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Aria live swarm context lookup failed: %s", exc)
                 swarm_context_block = ""
 
         composite_instruction = "\n".join(
@@ -626,6 +632,6 @@ class AriaCore:
                 reply=response,
                 response_style=response_style or source_kind,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Aria response learning write failed: %s", exc)
         return response

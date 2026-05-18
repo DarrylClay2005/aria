@@ -100,8 +100,8 @@ class Ultimatum(commands.Cog):
             try:
                 await user_a.timeout(timedelta(minutes=30))
                 await user_b.timeout(timedelta(minutes=30))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed ultimatum moderation failure: %s", exc)
             await interaction.channel.send(
                 "🩸 **DOUBLE BETRAYAL.** You both lose 40% Sanity and are timed out for 30 minutes. Beautiful."
             )
@@ -112,8 +112,8 @@ class Ultimatum(commands.Cog):
             await self.alter_sanity(victim.id, -50)
             try:
                 await victim.timeout(timedelta(minutes=30))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed ultimatum moderation failure: %s", exc)
             await interaction.channel.send(
                 f"🔪 **BLOODBATH.** {betrayer.display_name} restores 30% Sanity. {victim.mention} loses 50% Sanity and goes to timeout."
             )

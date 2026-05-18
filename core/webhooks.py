@@ -120,7 +120,7 @@ async def _persist_error_event(title, description, traceback_text=None, error_ty
                     ),
                 )
     except Exception as exc:
-        print(f"[ARIA] Failed to persist error event: {exc}", file=sys.stderr)
+        logger.warning("Failed to persist Aria error event: %s", exc)
 
 
 async def _send_embed_to_url(url: str, *, title, description, color, retries=3, fields=None, username="Aria", footer="Aria Matrix", thumbnail_url=None):
@@ -220,12 +220,12 @@ async def send_error_webhook_log(title, description, color=None, retries=3, fiel
         except Exception as exc:
             if _is_unknown_webhook(exc):
                 _DISABLED_WEBHOOK_URLS.add(ERROR_WEBHOOK_URL)
-                print("[ARIA] Error webhook disabled after Discord reported it no longer exists.", file=sys.stderr)
+                logger.warning("Aria error webhook disabled after Discord reported it no longer exists.")
                 return
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
-                print(f"[ARIA] Error webhook dispatch failed: {exc}", file=sys.stderr)
+                logger.warning("Aria error webhook dispatch failed: %s", exc)
 
 
 def dispatch_runtime_error(title, exc=None, *, description=None, traceback_text=None, error_type="runtime", level="error"):
@@ -249,7 +249,7 @@ def dispatch_runtime_error(title, exc=None, *, description=None, traceback_text=
         try:
             asyncio.run(runner())
         except Exception as dispatch_exc:
-            print(f"[ARIA] Failed to dispatch runtime error: {dispatch_exc}", file=sys.stderr)
+            logger.warning("Failed to dispatch Aria runtime error: %s", dispatch_exc)
 
 
 class AriaErrorWebhookHandler(logging.Handler):
@@ -265,8 +265,8 @@ class AriaErrorWebhookHandler(logging.Handler):
                 error_type="python_log",
                 level=record.levelname.lower(),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Aria error webhook logging handler suppressed a dispatch failure: %s", exc)
 
 
 def install_error_reporting():
