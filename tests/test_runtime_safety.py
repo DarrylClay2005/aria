@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import time
 
 import pytest
 
@@ -151,3 +152,15 @@ async def test_infra_timeout_kills_process(monkeypatch):
     assert success is False
     assert mode == "executed"
     assert "timed out" in result
+
+
+@pytest.mark.asyncio
+async def test_auto_infra_restart_cooldown_blocks_recent_target(monkeypatch):
+    monkeypatch.setenv("ARIA_AUTO_INFRA_RESTART_MIN_INTERVAL_SECONDS", "18000")
+    engine = AutonomousEngine(SimpleNamespace())
+    engine._infra_recent_restart_cache["nexus:restart"] = time.time()
+
+    blocked, reason = await engine._auto_infra_restart_recently_requested("nexus", "restart")
+
+    assert blocked is True
+    assert "cooldown" in reason

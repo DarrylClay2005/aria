@@ -107,6 +107,8 @@ class AutonomousEngine:
         self._infra_enabled = str(os.getenv('ARIA_ENABLE_INFRA_CONTROL', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_allow_execute = str(os.getenv('ARIA_ALLOW_INFRA_EXEC', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
         self._infra_auto_escalation_enabled = str(os.getenv('ARIA_AUTO_ESCALATE_INFRA_REPAIRS', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+        self._infra_restart_min_interval_seconds = max(0, int(os.getenv('ARIA_AUTO_INFRA_RESTART_MIN_INTERVAL_SECONDS', '18000') or '18000'))
+        self._infra_recent_restart_cache: dict[str, float] = {}
         # Global recovery pressure controls. These keep Aria from issuing a swarm-wide
         # RECOVER storm during Discord voice/Lavalink instability.
         self._swarm_recovery_window_seconds = max(30, int(os.getenv('ARIA_SWARM_RECOVERY_WINDOW_SECONDS', '90') or '90'))
@@ -468,6 +470,39 @@ class AutonomousEngine:
                     ),
                 )
 
+    async def _auto_infra_restart_recently_requested(self, target: str, action: str) -> tuple[bool, str]:
+        if str(action or "").lower() != "restart" or self._infra_restart_min_interval_seconds <= 0:
+            return False, ""
+        key = f"{str(target or '').strip().lower()}:{str(action or '').strip().lower()}"
+        now = time.time()
+        cached = self._infra_recent_restart_cache.get(key, 0.0)
+        if cached and now - cached < self._infra_restart_min_interval_seconds:
+            remaining = int(self._infra_restart_min_interval_seconds - (now - cached))
+            return True, f"automatic restart was already requested for {target}; {remaining}s remain in the cooldown"
+        if not db.pool:
+            return False, ""
+        await self.ensure_repair_tables()
+        async with db.pool.acquire() as conn:
+            async with conn.cursor(self._dict_cursor()) as cur:
+                await cur.execute(
+                    """
+                    SELECT created_at, execution_mode
+                    FROM aria_infra_history
+                    WHERE target_name=%s
+                      AND action_name=%s
+                      AND execution_mode IN ('planned', 'executed')
+                      AND created_at >= NOW() - INTERVAL %s SECOND
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (target[:64], action[:64], int(self._infra_restart_min_interval_seconds)),
+                )
+                row = await cur.fetchone()
+        if not row:
+            return False, ""
+        self._infra_recent_restart_cache[key] = now
+        return True, f"recent {row.get('execution_mode') or 'restart'} at {row.get('created_at')}"
+
     async def _queue_infra_task(self, issue: dict[str, Any], *, target: str, action: str, reason: str) -> bool:
         if not db.pool:
             return False
@@ -493,6 +528,28 @@ class AutonomousEngine:
             except Exception as exc:
                 logger.debug("Suppressed best-effort autonomy failure: %s", exc)
             return False
+        issue_type = str(issue.get("type") or "")
+        if action.lower() == "restart" and issue_type not in {"manual_restart", "operator_restart"}:
+            blocked, block_reason = await self._auto_infra_restart_recently_requested(target, action)
+            if blocked:
+                await self._record_infra_history(
+                    target=target,
+                    action=action,
+                    issue=issue,
+                    success=False,
+                    execution_mode="guarded",
+                    command_text=command_text,
+                    result_text=f"automatic infra restart cooldown suppressed: {block_reason}",
+                )
+                try:
+                    await send_ops_webhook_log(
+                        "Aria Infra Cooldown",
+                        f"Suppressed automatic {action} for {target}.",
+                        fields=[("Reason", block_reason[:512], False), ("Issue", issue_type[:128] or "unknown", True)],
+                    )
+                except Exception as exc:
+                    logger.debug("Suppressed best-effort autonomy failure: %s", exc)
+                return False
         async with db.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -516,6 +573,8 @@ class AutonomousEngine:
                     ),
                 )
         await self._record_infra_history(target=target, action=action, issue=issue, success=False, execution_mode="planned", command_text=command_text, result_text=reason)
+        if action.lower() == "restart":
+            self._infra_recent_restart_cache[f"{target.strip().lower()}:{action.strip().lower()}"] = time.time()
         try:
             await send_ops_webhook_log("Aria Infra Escalation", f"Queued {action} for {target}.", fields=[("Reason", reason[:512], False), ("Issue", str(issue.get('type') or 'unknown')[:128], True)])
         except Exception as exc:
