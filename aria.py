@@ -42,6 +42,7 @@ class AriaBot(commands.Bot):
         self.monitor = Monitor(self, self.event_bus)
         self.monitor_task = None
         self.heartbeat_task = None
+        self.health_watch_task = None
         self.telegram_bridge = None
         self.aria_chat_semaphore = asyncio.Semaphore(max(1, int(os.getenv("ARIA_CHAT_CONCURRENCY", "3") or "3")))
         self._last_ready_webhook_at = 0.0
@@ -123,6 +124,14 @@ class AriaBot(commands.Bot):
                 pass
             except Exception:
                 logger.exception("Aria heartbeat task raised while shutting down.")
+        if self.health_watch_task and not self.health_watch_task.done():
+            self.health_watch_task.cancel()
+            try:
+                await self.health_watch_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Aria health watch task raised while shutting down.")
         try:
             await self.write_heartbeat("offline")
         except Exception:
@@ -181,6 +190,32 @@ class AriaBot(commands.Bot):
                 raise
             except Exception:
                 logger.exception("Aria heartbeat update failed.")
+            await asyncio.sleep(interval)
+
+    async def health_watch_loop(self):
+        interval = max(60.0, float(os.getenv("ARIA_HEALTH_WATCH_INTERVAL_SECONDS", "300") or "300"))
+        cooldown = max(300.0, float(os.getenv("ARIA_HEALTH_ALERT_COOLDOWN_SECONDS", "900") or "900"))
+        last_alerts: dict[str, float] = {}
+        await asyncio.sleep(20)
+        while not self.is_closed():
+            try:
+                if not db.pool:
+                    raise RuntimeError("Aria database pool is not connected")
+                async with db.pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT 1")
+                        await cur.fetchone()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                now = time.monotonic()
+                if now - last_alerts.get("db", 0.0) >= cooldown:
+                    last_alerts["db"] = now
+                    await send_error_webhook_log("Aria Database Health Alert", str(exc), traceback_text=None)
+                try:
+                    await db.connect()
+                except Exception:
+                    logger.exception("Aria database reconnect failed after health watch alert.")
             await asyncio.sleep(interval)
 
     # ARIA LIVE DATA FIX: Telegram needs a Discord guild context to read queues.
@@ -501,6 +536,9 @@ async def on_ready():
     heartbeat_task = bot.heartbeat_task
     if heartbeat_task is None or heartbeat_task.done():
         bot.heartbeat_task = asyncio.create_task(bot.heartbeat_loop(), name="aria-heartbeat")
+    health_watch_task = bot.health_watch_task
+    if health_watch_task is None or health_watch_task.done():
+        bot.health_watch_task = asyncio.create_task(bot.health_watch_loop(), name="aria-health-watch")
 
 
 async def send_discord_safely(channel, text: str, *, limit: int = 1900):

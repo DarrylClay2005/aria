@@ -2054,15 +2054,28 @@ class AutonomousEngine:
                     "drone": event.get("bot_name"),
                     "guild_id": guild_id,
                     "current_track": payload.get("track_query"),
+                    "channel_id": payload.get("channel_id"),
+                    "text_channel_id": payload.get("text_channel_id"),
+                    "home_vc_id": payload.get("home_vc_id"),
+                    "queue_count": payload.get("queue_count", 0),
+                    "backup_count": payload.get("backup_count", 0),
+                    "is_playing": payload.get("is_playing", False),
+                    "is_paused": payload.get("is_paused", False),
+                    "updated_seconds": payload.get("updated_seconds", self._state_recovery_min_age_seconds + 1),
                 }
-                pause_seconds = self._retry_exhausted_pause_seconds if category == "recovery_retries_exhausted" else self._voice_timeout_pause_seconds
-                await self._arm_repair_guard(
-                    issue,
-                    "recover_resume",
-                    window_seconds=pause_seconds,
-                    note=f"Suppressed autonomous recovery after {category}.",
-                )
-                return False
+                if event_age_seconds > self._event_auto_recovery_max_age_seconds:
+                    return False
+                should_act, reason = self._should_auto_act_on_issue(issue)
+                if not should_act:
+                    pause_seconds = self._retry_exhausted_pause_seconds if category == "recovery_retries_exhausted" else self._voice_timeout_pause_seconds
+                    await self._arm_repair_guard(
+                        issue,
+                        "recover_resume",
+                        window_seconds=pause_seconds,
+                        note=f"Observed {category} without safe recovery action: {reason}.",
+                    )
+                    return False
+                return await self.fix_issue(issue)
             if category in {"stale_swarm_node", "heartbeat_stale"}:
                 issue = {
                     "type": "stale_swarm_node",

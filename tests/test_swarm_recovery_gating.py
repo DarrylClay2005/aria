@@ -68,7 +68,38 @@ def test_autonomy_recover_from_queue_rejects_active_playback():
 
 
 @pytest.mark.asyncio
-async def test_handle_event_voice_timeout_arms_pause_without_recovering():
+async def test_handle_event_voice_timeout_recovers_when_state_is_safe():
+    engine = AutonomousEngine(SimpleNamespace())
+    engine._arm_repair_guard = AsyncMock()
+    engine.fix_issue = AsyncMock(return_value=True)
+
+    result = await engine.handle_event(
+        {
+            "event_type": "bot_error_logged",
+            "bot_name": "nexus",
+            "guild_id": 42,
+            "payload": {
+                "error_category": "voice_connect_timeout",
+                "track_query": "test song",
+                "home_vc_id": 123,
+                "channel_id": 123,
+                "queue_count": 5,
+                "backup_count": 2,
+                "is_playing": False,
+                "is_paused": False,
+                "updated_seconds": 300,
+            },
+            "created_at": "2099-05-06 15:00:00",
+        }
+    )
+
+    assert result is True
+    engine.fix_issue.assert_awaited_once()
+    engine._arm_repair_guard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_event_voice_timeout_guards_when_anchor_is_missing():
     engine = AutonomousEngine(SimpleNamespace())
     engine._arm_repair_guard = AsyncMock()
     engine.fix_issue = AsyncMock()
@@ -81,8 +112,13 @@ async def test_handle_event_voice_timeout_arms_pause_without_recovering():
             "payload": {
                 "error_category": "voice_connect_timeout",
                 "track_query": "test song",
+                "queue_count": 5,
+                "backup_count": 2,
+                "is_playing": False,
+                "is_paused": False,
+                "updated_seconds": 300,
             },
-            "created_at": "2026-05-06 15:00:00",
+            "created_at": "2099-05-06 15:00:00",
         }
     )
 
