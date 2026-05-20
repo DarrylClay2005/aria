@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 import traceback
 
@@ -85,6 +86,16 @@ def _is_unknown_webhook(exc: Exception) -> bool:
     return "unknown webhook" in text or "error code: 10015" in text
 
 
+def _redact_secret_text(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    redacted = re.sub(r"(?i)(https://discord(?:app)?\.com/api/webhooks/\d+/)[^\s]+", r"\1[REDACTED]", text)
+    redacted = re.sub(r"(?i)(https://api\.telegram\.org/bot)[^/\s]+", r"\1[REDACTED]", redacted)
+    redacted = re.sub(r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|WEBHOOK)[A-Z0-9_]*=)([^\s]+)", r"\1[REDACTED]", redacted)
+    return redacted
+
+
 async def _persist_error_event(title, description, traceback_text=None, error_type="runtime", level="error"):
     if not getattr(db, "pool", None):
         return
@@ -153,7 +164,7 @@ async def _send_embed_to_url(url: str, *, title, description, color, retries=3, 
                 logger.warning("Aria webhook disabled after Discord reported it no longer exists.")
                 return False
             if attempt >= retries - 1:
-                logger.warning("Aria webhook dispatch failed: %s", exc)
+                logger.warning("Aria webhook dispatch failed: %s", _redact_secret_text(exc))
             else:
                 await asyncio.sleep(2 ** attempt)
     return False
@@ -225,7 +236,7 @@ async def send_error_webhook_log(title, description, color=None, retries=3, fiel
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
-                logger.warning("Aria error webhook dispatch failed: %s", exc)
+                logger.warning("Aria error webhook dispatch failed: %s", _redact_secret_text(exc))
 
 
 def dispatch_runtime_error(title, exc=None, *, description=None, traceback_text=None, error_type="runtime", level="error"):
@@ -249,7 +260,7 @@ def dispatch_runtime_error(title, exc=None, *, description=None, traceback_text=
         try:
             asyncio.run(runner())
         except Exception as dispatch_exc:
-            logger.warning("Failed to dispatch Aria runtime error: %s", dispatch_exc)
+            logger.warning("Failed to dispatch Aria runtime error: %s", _redact_secret_text(dispatch_exc))
 
 
 class AriaErrorWebhookHandler(logging.Handler):

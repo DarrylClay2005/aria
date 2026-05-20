@@ -90,7 +90,7 @@ class AutonomousEngine:
         self._state_recovery_min_age_seconds = max(45, int(os.getenv('ARIA_RECOVERY_MIN_AGE_SECONDS', '60') or '60'))
         self._playback_drift_min_age_seconds = max(30, int(os.getenv('ARIA_PLAYBACK_DRIFT_MIN_AGE_SECONDS', '90') or '90'))
         self._predictive_queue_rebalance_min_delta = max(5, int(os.getenv('ARIA_PREDICTIVE_QUEUE_DRIFT_MIN_DELTA', '8') or '8'))
-        self._event_auto_recovery_max_age_seconds = max(20, int(os.getenv('ARIA_EVENT_AUTO_RECOVERY_MAX_AGE_SECONDS', '180') or '180'))
+        self._event_auto_recovery_max_age_seconds = max(20, int(os.getenv('ARIA_EVENT_AUTO_RECOVERY_MAX_AGE_SECONDS', '600') or '600'))
         self._voice_timeout_pause_seconds = max(90, int(os.getenv('ARIA_VOICE_TIMEOUT_PAUSE_SECONDS', '240') or '240'))
         self._retry_exhausted_pause_seconds = max(90, int(os.getenv('ARIA_RETRY_EXHAUSTED_PAUSE_SECONDS', '180') or '180'))
         self._infra_timeout_seconds = min(300, max(15, int(os.getenv('ARIA_INFRA_TIMEOUT_SECONDS', '45') or '45')))
@@ -1069,6 +1069,8 @@ class AutonomousEngine:
             return default
 
     def _issue_has_recovery_material(self, issue: dict[str, Any]) -> bool:
+        if issue.get("recovery_probe"):
+            return True
         return bool(
             issue.get("current_track")
             or self._to_int(issue.get("queue_count")) > 0
@@ -1076,6 +1078,8 @@ class AutonomousEngine:
         )
 
     def _issue_has_anchor(self, issue: dict[str, Any]) -> bool:
+        if issue.get("recovery_probe"):
+            return True
         return bool(issue.get("home_vc_id") or issue.get("channel_id"))
 
     def _issue_updated_seconds(self, issue: dict[str, Any]) -> float:
@@ -1774,8 +1778,11 @@ class AutonomousEngine:
                 return RepairResult(True, "recover_skipped_paused", drone, details="playback is paused; RECOVER not needed")
             if self._to_bool(playback.get("is_playing")):
                 return RepairResult(True, "recover_skipped_active", drone, details="playback is already active; RECOVER not needed")
+            issue_age = self._issue_updated_seconds(issue)
+            if 0 <= issue_age < self._state_recovery_min_age_seconds:
+                return RepairResult(True, "recover_skipped_fresh", drone, details=f"reported playback state is only {int(issue_age)}s old")
             updated_at = playback.get("updated_at")
-            if updated_at is not None:
+            if issue_age < 0 and updated_at is not None:
                 try:
                     age = max(0.0, time.time() - updated_at.timestamp())
                     if age < self._state_recovery_min_age_seconds:
@@ -1785,6 +1792,22 @@ class AutonomousEngine:
         if live_queue_count <= 0 and live_backup_count <= 0 and not (playback or {}).get("current_track") and not issue.get("current_track"):
             return RepairResult(False, "recover_skipped_empty", drone, details="no queue, backup queue, or current track to recover")
         vc_id = issue.get("home_vc_id") or issue.get("channel_id") or (playback or {}).get("channel_id")
+        if not vc_id:
+            try:
+                home = await self._fetchone(
+                    cur,
+                    f"""
+                    SELECT home_vc_id
+                    FROM {cfg['schema']}.{cfg['home']}
+                    WHERE guild_id=%s AND (bot_name=%s OR bot_name IS NULL OR bot_name='')
+                    ORDER BY CASE WHEN bot_name=%s THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (guild_id, drone, drone),
+                ) or {}
+                vc_id = home.get("home_vc_id")
+            except Exception as exc:
+                logger.debug("Suppressed best-effort autonomy failure: %s", exc)
         text_channel_id = issue.get("text_channel_id") or (playback or {}).get("text_channel_id")
         if not vc_id:
             return RepairResult(False, "recover", drone, "no home or playback channel available")
@@ -2074,7 +2097,7 @@ class AutonomousEngine:
                 "current_track": payload.get("current_track"),
                 "is_playing": payload.get("is_playing"),
                 "is_paused": payload.get("is_paused"),
-                "updated_seconds": payload.get("updated_seconds"),
+                "updated_seconds": payload.get("updated_seconds", self._state_recovery_min_age_seconds + 1),
             }
             if event_age_seconds > self._event_auto_recovery_max_age_seconds:
                 return False
@@ -2096,7 +2119,7 @@ class AutonomousEngine:
                 "updated_stale": True,
                 "is_playing": payload.get("is_playing"),
                 "is_paused": payload.get("is_paused"),
-                "updated_seconds": payload.get("updated_seconds"),
+                "updated_seconds": payload.get("updated_seconds", self._playback_drift_min_age_seconds + 1),
             }
             if event_age_seconds > self._event_auto_recovery_max_age_seconds:
                 return False
@@ -2121,6 +2144,7 @@ class AutonomousEngine:
                     "is_playing": payload.get("is_playing", False),
                     "is_paused": payload.get("is_paused", False),
                     "updated_seconds": payload.get("updated_seconds", self._state_recovery_min_age_seconds + 1),
+                    "recovery_probe": True,
                 }
                 if event_age_seconds > self._event_auto_recovery_max_age_seconds:
                     return False

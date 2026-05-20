@@ -9,3 +9,8 @@ __pycache__/
 *.sqlite3
 .DS_Store
 .codex
+.pytest_cache/
+*.backup-*
+*.bak
+.aria_patch_backups/
+.aria_*_backup_*/

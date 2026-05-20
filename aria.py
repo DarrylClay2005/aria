@@ -46,6 +46,7 @@ class AriaBot(commands.Bot):
         self.telegram_bridge = None
         self.aria_chat_semaphore = asyncio.Semaphore(max(1, int(os.getenv("ARIA_CHAT_CONCURRENCY", "3") or "3")))
         self._last_ready_webhook_at = 0.0
+        self._telegram_alert_last: dict[str, float] = {}
 
     async def setup_hook(self):
         # 🟢 Boot the global DB pool BEFORE cogs load
@@ -111,6 +112,12 @@ class AriaBot(commands.Bot):
                 ],
             )
             await self.telegram_bridge.start()
+            await self.notify_telegram_operator(
+                "Aria online",
+                "Telegram bridge, heartbeat, and health watcher are available.",
+                key="startup",
+                cooldown=0.0,
+            )
 
     async def close(self):
         # 🟢 Cleanly close long-lived resources when the bot shuts down.
@@ -212,11 +219,32 @@ class AriaBot(commands.Bot):
                 if now - last_alerts.get("db", 0.0) >= cooldown:
                     last_alerts["db"] = now
                     await send_error_webhook_log("Aria Database Health Alert", str(exc), traceback_text=None)
+                    await self.notify_telegram_operator(
+                        "Aria database problem",
+                        str(exc),
+                        key="db-health",
+                        cooldown=cooldown,
+                    )
                 try:
                     await db.connect()
                 except Exception:
                     logger.exception("Aria database reconnect failed after health watch alert.")
             await asyncio.sleep(interval)
+
+    async def notify_telegram_operator(self, title: str, detail: str, *, key: str, cooldown: float | None = None) -> None:
+        if not self.telegram_bridge or not TELEGRAM_ALLOWED_CHAT_IDS:
+            return
+        interval = cooldown if cooldown is not None else max(300.0, float(os.getenv("ARIA_TELEGRAM_ALERT_COOLDOWN_SECONDS", "900") or "900"))
+        now = time.monotonic()
+        if now - self._telegram_alert_last.get(key, 0.0) < interval:
+            return
+        self._telegram_alert_last[key] = now
+        message = f"{title}\n{str(detail or '').strip()[:1200]}"
+        for chat_id in sorted(TELEGRAM_ALLOWED_CHAT_IDS):
+            try:
+                await self.telegram_bridge.send_message(chat_id, message)
+            except Exception:
+                logger.debug("Aria Telegram operator alert failed for chat %s.", chat_id, exc_info=True)
 
     # ARIA LIVE DATA FIX: Telegram needs a Discord guild context to read queues.
     def _resolve_telegram_guild(self, chat_id: int | None = None):

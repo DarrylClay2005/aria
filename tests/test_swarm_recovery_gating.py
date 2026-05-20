@@ -99,10 +99,10 @@ async def test_handle_event_voice_timeout_recovers_when_state_is_safe():
 
 
 @pytest.mark.asyncio
-async def test_handle_event_voice_timeout_guards_when_anchor_is_missing():
+async def test_handle_event_voice_timeout_probes_when_anchor_is_missing():
     engine = AutonomousEngine(SimpleNamespace())
     engine._arm_repair_guard = AsyncMock()
-    engine.fix_issue = AsyncMock()
+    engine.fix_issue = AsyncMock(return_value=True)
 
     result = await engine.handle_event(
         {
@@ -122,9 +122,11 @@ async def test_handle_event_voice_timeout_guards_when_anchor_is_missing():
         }
     )
 
-    assert result is False
-    engine._arm_repair_guard.assert_awaited_once()
-    engine.fix_issue.assert_not_called()
+    assert result is True
+    engine.fix_issue.assert_awaited_once()
+    issue = engine.fix_issue.await_args.args[0]
+    assert issue["recovery_probe"] is True
+    engine._arm_repair_guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio

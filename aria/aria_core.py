@@ -4,6 +4,7 @@ import re
 from collections import defaultdict, deque
 from copy import deepcopy
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from core.intent_parser import IntentParser
 from core.commands import router
@@ -54,6 +55,23 @@ def is_telegram_style(style: str | None) -> bool:
 def is_discord_style(style: str | None) -> bool:
     normalized = str(style or "").strip().lower()
     return normalized in DISCORD_RESPONSE_STYLES or normalized.startswith("discord_")
+
+
+def runtime_context_block() -> str:
+    tz_name = os.getenv("ARIA_LOCAL_TIMEZONE") or os.getenv("TZ") or "America/Chicago"
+    try:
+        local_now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        tz_name = "UTC"
+        local_now = datetime.now(timezone.utc)
+    utc_now = datetime.now(timezone.utc)
+    return (
+        "Runtime context: "
+        f"current local datetime is {local_now.isoformat(timespec='seconds')} ({tz_name}); "
+        f"current UTC datetime is {utc_now.isoformat(timespec='seconds')}. "
+        "Treat this runtime context as authoritative for dates, years, recency, time zones, and relative words like today, tomorrow, and yesterday. "
+        "If the user asks for live or changing real-world facts and no live source is available, say what data you can verify from runtime context and be explicit about uncertainty."
+    )
 QUERY_OPTION_SPLIT_RE = re.compile(r"\s+(?:or|vs\.?|versus)\s+", re.IGNORECASE)
 ORDINAL_MAP = {
     "1": 0,
@@ -579,6 +597,7 @@ class AriaCore:
             part
             for part in (
                 base_instruction,
+                runtime_context_block(),
                 prompt_fragment,
                 "Continuity rule: answer the current message as part of the same thread. Do not reset the conversation after two replies; resolve short follow-ups from recent context before asking for clarification."
                 if dialogue_context_block else "",

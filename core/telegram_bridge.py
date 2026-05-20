@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -15,6 +16,15 @@ logger = logging.getLogger("discord")
 
 
 TelegramHandler = Callable[[dict[str, Any]], Awaitable[str | None]]
+
+
+def _redact_secret_text(value: object) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    redacted = re.sub(r"(?i)(https://api\.telegram\.org/bot)[^/\s]+", r"\1[REDACTED]", text)
+    redacted = re.sub(r"(?i)(https://discord(?:app)?\.com/api/webhooks/\d+/)[^\s]+", r"\1[REDACTED]", redacted)
+    return redacted
 
 
 @dataclass
@@ -67,8 +77,8 @@ class TelegramBridge:
             await self._register_commands()
             logger.info("Telegram bridge for %s connected as @%s.", self.name, self.status.bot_username or "unknown")
         except Exception as exc:
-            self.status.last_error = str(exc)[:240]
-            logger.warning("Telegram bridge for %s could not verify token yet: %s", self.name, exc)
+            self.status.last_error = _redact_secret_text(exc)[:240]
+            logger.warning("Telegram bridge for %s could not verify token yet: %s", self.name, _redact_secret_text(exc))
         self._closing.clear()
         self._task = asyncio.create_task(self._poll_loop(), name=f"{self.name}-telegram-bridge")
 
@@ -115,7 +125,7 @@ class TelegramBridge:
                         await self._register_commands()
                         logger.info("Telegram bridge for %s registered commands.", self.name)
                     except Exception as reg_exc:
-                        logger.warning("Telegram bridge for %s command registration failed, will retry: %s", self.name, reg_exc)
+                        logger.warning("Telegram bridge for %s command registration failed, will retry: %s", self.name, _redact_secret_text(reg_exc))
 
                 params: dict[str, Any] = {
                     "timeout": self.poll_timeout_seconds,
@@ -132,8 +142,8 @@ class TelegramBridge:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.status.last_error = str(exc)[:240]
-                logger.warning("Telegram bridge for %s polling error: %s", self.name, exc)
+                self.status.last_error = _redact_secret_text(exc)[:240]
+                logger.warning("Telegram bridge for %s polling error: %s", self.name, _redact_secret_text(exc))
                 await asyncio.sleep(5)
         self.status.running = False
 
@@ -157,8 +167,8 @@ class TelegramBridge:
             if reply:
                 await self.send_message(normalized_chat_id, reply)
         except Exception as exc:
-            logger.exception("Telegram handler for %s failed: %s", self.name, exc)
-            await self.send_message(normalized_chat_id, f"Telegram command failed: {exc}")
+            logger.exception("Telegram handler for %s failed: %s", self.name, _redact_secret_text(exc))
+            await self.send_message(normalized_chat_id, f"Telegram command failed: {_redact_secret_text(exc)}")
 
     async def _api(self, method: str, params: dict[str, Any] | None = None, *, timeout: int = 20) -> dict[str, Any]:
         return await asyncio.to_thread(self._api_sync, method, params or {}, timeout)
